@@ -73,6 +73,12 @@ fn operations(
         .collect()
 }
 
+struct Destination<'a> {
+    folder: &'a Path,
+    subfolder: Option<&'a str>,
+    rename: Option<&'a str>,
+}
+
 fn operation_for(
     rule: &Rule,
     action: &Action,
@@ -81,12 +87,20 @@ fn operation_for(
 ) -> Result<Operation, EvaluationError> {
     let from = facts.path.clone();
     match action {
-        Action::MoveTo { folder, rename } => Ok(Operation::Move {
-            to: folder.join(target_name(rule, rename.as_deref(), facts, context)?),
+        Action::MoveTo {
+            folder,
+            subfolder,
+            rename,
+        } => Ok(Operation::Move {
+            to: target(rule, destination(folder, subfolder, rename), facts, context)?,
             from,
         }),
-        Action::CopyTo { folder, rename } => Ok(Operation::Copy {
-            to: folder.join(target_name(rule, rename.as_deref(), facts, context)?),
+        Action::CopyTo {
+            folder,
+            subfolder,
+            rename,
+        } => Ok(Operation::Copy {
+            to: target(rule, destination(folder, subfolder, rename), facts, context)?,
             from,
         }),
         Action::RenameTo { template } => Ok(Operation::Move {
@@ -95,6 +109,46 @@ fn operation_for(
         }),
         Action::Trash => Ok(Operation::Trash { from }),
     }
+}
+
+fn destination<'a>(
+    folder: &'a Path,
+    subfolder: &'a Option<String>,
+    rename: &'a Option<String>,
+) -> Destination<'a> {
+    Destination {
+        folder,
+        subfolder: subfolder.as_deref(),
+        rename: rename.as_deref(),
+    }
+}
+
+fn target(
+    rule: &Rule,
+    destination: Destination,
+    facts: &FileFacts,
+    context: PlanContext,
+) -> Result<PathBuf, EvaluationError> {
+    let mut path = destination.folder.to_path_buf();
+    if let Some(template) = destination.subfolder {
+        path.push(render_subfolder(rule, template, facts, context)?);
+    }
+    path.push(target_name(rule, destination.rename, facts, context)?);
+    Ok(path)
+}
+
+fn render_subfolder(
+    rule: &Rule,
+    template: &str,
+    facts: &FileFacts,
+    context: PlanContext,
+) -> Result<PathBuf, EvaluationError> {
+    templates::render_subfolder(template, substitutions(facts, context)).map_err(|source| {
+        EvaluationError::Template {
+            rule: rule.name.clone(),
+            source,
+        }
+    })
 }
 
 fn target_name(
@@ -119,18 +173,20 @@ fn render(
     facts: &FileFacts,
     context: PlanContext,
 ) -> Result<String, EvaluationError> {
-    templates::render(
-        template,
-        Substitutions {
-            path: &facts.path,
-            modified: facts.modified,
-            counter: context.counter,
-        },
-    )
-    .map_err(|source| EvaluationError::Template {
-        rule: rule.name.clone(),
-        source,
+    templates::render(template, substitutions(facts, context)).map_err(|source| {
+        EvaluationError::Template {
+            rule: rule.name.clone(),
+            source,
+        }
     })
+}
+
+fn substitutions(facts: &FileFacts, context: PlanContext) -> Substitutions<'_> {
+    Substitutions {
+        path: &facts.path,
+        modified: facts.modified,
+        counter: context.counter,
+    }
 }
 
 fn parent_of(facts: &FileFacts) -> Result<PathBuf, EvaluationError> {
@@ -177,6 +233,7 @@ mod tests {
     fn move_action(folder: &str) -> Action {
         Action::MoveTo {
             folder: PathBuf::from(folder),
+            subfolder: None,
             rename: None,
         }
     }
@@ -342,6 +399,7 @@ mod tests {
         let mut copying = rule("backup", Combinator::All, vec![is_pdf()]);
         copying.actions = vec![Action::CopyTo {
             folder: PathBuf::from("/backup"),
+            subfolder: None,
             rename: None,
         }];
 
@@ -361,6 +419,7 @@ mod tests {
         let mut renaming = rule("dated", Combinator::All, vec![is_pdf()]);
         renaming.actions = vec![Action::MoveTo {
             folder: PathBuf::from("/out"),
+            subfolder: None,
             rename: Some("{date} {name}.{ext}".into()),
         }];
 
@@ -422,5 +481,68 @@ mod tests {
         let action: Action = serde_json::from_str(json).unwrap();
 
         assert_eq!(action, move_action("/out"));
+    }
+
+    #[test]
+    fn a_subfolder_template_builds_a_dated_destination() {
+        let mut dated = rule("archive", Combinator::All, vec![is_pdf()]);
+        dated.actions = vec![Action::MoveTo {
+            folder: PathBuf::from("/archive"),
+            subfolder: Some("{year}/{month}".into()),
+            rename: None,
+        }];
+
+        let operations = plan(&[dated], &facts("invoice.pdf"), context()).unwrap();
+
+        let Operation::Move { to, .. } = &operations[0] else {
+            panic!("expected a move");
+        };
+        assert_eq!(
+            to,
+            &PathBuf::from("/archive")
+                .join("2026")
+                .join("03")
+                .join("invoice.pdf")
+        );
+    }
+
+    #[test]
+    fn a_subfolder_can_group_by_extension_while_renaming() {
+        let mut sorted = rule("by-type", Combinator::All, vec![is_pdf()]);
+        sorted.actions = vec![Action::CopyTo {
+            folder: PathBuf::from("/sorted"),
+            subfolder: Some("{ext}".into()),
+            rename: Some("{date}.{ext}".into()),
+        }];
+
+        let operations = plan(&[sorted], &facts("invoice.pdf"), context()).unwrap();
+
+        assert_eq!(
+            operations,
+            [Operation::Copy {
+                from: PathBuf::from("/watched/invoice.pdf"),
+                to: PathBuf::from("/sorted").join("pdf").join("2026-03-07.pdf"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_subfolder_that_escapes_names_the_rule() {
+        let mut hostile = rule("escaping", Combinator::All, vec![is_pdf()]);
+        hostile.actions = vec![Action::MoveTo {
+            folder: PathBuf::from("/out"),
+            subfolder: Some("../../elsewhere".into()),
+            rename: None,
+        }];
+
+        let error = plan(&[hostile], &facts("a.pdf"), context()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            EvaluationError::Template {
+                ref rule,
+                source: TemplateError::PathTraversal
+            } if rule == "escaping"
+        ));
     }
 }

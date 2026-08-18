@@ -25,10 +25,14 @@ pub enum Action {
     MoveTo {
         folder: PathBuf,
         #[serde(default)]
+        subfolder: Option<String>,
+        #[serde(default)]
         rename: Option<String>,
     },
     CopyTo {
         folder: PathBuf,
+        #[serde(default)]
+        subfolder: Option<String>,
         #[serde(default)]
         rename: Option<String>,
     },

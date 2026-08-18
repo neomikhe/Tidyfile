@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
@@ -44,6 +44,23 @@ pub fn render(template: &str, values: Substitutions) -> Result<String, TemplateE
     let rendered = substitute(template, values)?;
     validate(&rendered)?;
     Ok(rendered)
+}
+
+pub fn render_subfolder(template: &str, values: Substitutions) -> Result<PathBuf, TemplateError> {
+    if template.len() > MAX_TEMPLATE_LENGTH {
+        return Err(TemplateError::TooLong);
+    }
+    reject_traversal(template)?;
+    build_relative(&substitute(template, values)?)
+}
+
+fn build_relative(rendered: &str) -> Result<PathBuf, TemplateError> {
+    let mut relative = PathBuf::new();
+    for component in rendered.split(['/', '\\']) {
+        validate(component)?;
+        relative.push(component);
+    }
+    Ok(relative)
 }
 
 fn reject_traversal(template: &str) -> Result<(), TemplateError> {
@@ -314,6 +331,80 @@ mod tests {
         assert_eq!(
             render_for(&template, "a.pdf").unwrap_err(),
             TemplateError::Unusable
+        );
+    }
+
+    fn subfolder_for(template: &str, name: &str) -> Result<PathBuf, TemplateError> {
+        let (path, modified) = values(name);
+        render_subfolder(
+            template,
+            Substitutions {
+                path: &path,
+                modified,
+                counter: 3,
+            },
+        )
+    }
+
+    #[test]
+    fn a_subfolder_template_builds_a_relative_path() {
+        assert_eq!(
+            subfolder_for("{year}/{month}", "a.pdf").unwrap(),
+            PathBuf::from("2026").join("03")
+        );
+    }
+
+    #[test]
+    fn a_subfolder_can_group_by_extension() {
+        assert_eq!(
+            subfolder_for("by type/{ext}", "photo.jpg").unwrap(),
+            PathBuf::from("by type").join("jpg")
+        );
+    }
+
+    #[test]
+    fn a_subfolder_accepts_backslashes_as_separators() {
+        assert_eq!(
+            subfolder_for(r"{year}\{month}", "a.pdf").unwrap(),
+            PathBuf::from("2026").join("03")
+        );
+    }
+
+    #[test]
+    fn a_subfolder_cannot_be_absolute() {
+        for template in ["/{year}", r"\{year}", "C:/{year}"] {
+            assert!(
+                subfolder_for(template, "a.pdf").is_err(),
+                "template {template} was not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_subfolder_cannot_climb_out() {
+        assert_eq!(
+            subfolder_for("{year}/../..", "a.pdf").unwrap_err(),
+            TemplateError::PathTraversal
+        );
+    }
+
+    #[test]
+    fn a_subfolder_rejects_empty_components() {
+        assert_eq!(
+            subfolder_for("{year}//{month}", "a.pdf").unwrap_err(),
+            TemplateError::Unusable
+        );
+        assert_eq!(
+            subfolder_for("", "a.pdf").unwrap_err(),
+            TemplateError::Unusable
+        );
+    }
+
+    #[test]
+    fn a_subfolder_component_cannot_be_a_reserved_name() {
+        assert_eq!(
+            subfolder_for("archive/{name}", "NUL.txt").unwrap_err(),
+            TemplateError::ReservedName
         );
     }
 }
