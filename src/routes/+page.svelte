@@ -36,7 +36,7 @@
   async function pickFolder(): Promise<void> {
     const picked = await open({ directory: true, multiple: false });
     if (typeof picked === "string") {
-      await workspace.chooseFolder(picked);
+      await workspace.addFolder(picked);
     }
   }
 
@@ -130,7 +130,7 @@
       <button onclick={createRule}>New rule</button>
 
       <h2>Preview</h2>
-      {#if workspace.folder === null}
+      {#if workspace.folders.length === 0}
         <p class="empty">Choose a folder in Settings to see what would change.</p>
       {:else if workspace.preview === null}
         <p class="empty">Nothing simulated yet.</p>
@@ -246,9 +246,20 @@
   {:else}
     <section aria-labelledby="settings-heading">
       <h2 id="settings-heading">Settings</h2>
-      <h3>Watched folder</h3>
-      <p class="folder">{workspace.folder ?? "None chosen"}</p>
-      <button onclick={pickFolder}>Choose folder</button>
+      <h3>Watched folders</h3>
+      {#if workspace.folders.length === 0}
+        <p class="empty">None chosen yet.</p>
+      {:else}
+        <ul class="folders">
+          {#each workspace.folders as watched (watched)}
+            <li>
+              <span class="folder">{watched}</span>
+              <button onclick={() => workspace.removeFolder(watched)}>Remove</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <button onclick={pickFolder}>Add folder</button>
       <p class="note">
         System folders, drive roots and your whole home folder cannot be watched.
       </p>
@@ -271,7 +282,7 @@
         <input
           type="checkbox"
           checked={workspace.watching}
-          disabled={workspace.folder === null || workspace.status.kind === "working"}
+          disabled={workspace.folders.length === 0 || workspace.status.kind === "working"}
           onchange={(event) => workspace.setWatching(event.currentTarget.checked)}
         />
         <span>Tidy new files as they arrive</span>
@@ -369,6 +380,10 @@
   li.batch {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .folders li {
+    justify-content: space-between;
   }
 
   .details {

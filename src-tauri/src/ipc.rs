@@ -66,7 +66,7 @@ pub struct AppState {
     service: Arc<Mutex<Tidyfile>>,
     rules_file: PathBuf,
     settings_file: PathBuf,
-    session: Mutex<Option<WatchSession>>,
+    sessions: Mutex<Vec<WatchSession>>,
 }
 
 impl AppState {
@@ -75,7 +75,7 @@ impl AppState {
             service: Arc::new(Mutex::new(Tidyfile::open(&folder.join("journal.sqlite"))?)),
             rules_file: folder.join("rules.json"),
             settings_file: folder.join("settings.json"),
-            session: Mutex::new(None),
+            sessions: Mutex::new(Vec::new()),
         })
     }
 }
@@ -84,51 +84,56 @@ impl AppState {
 pub fn start_watching(
     app: AppHandle,
     state: State<'_, AppState>,
-    folder: String,
+    folders: Vec<String>,
 ) -> Result<(), IpcError> {
-    let started = watch::start(
-        app,
-        state.service.clone(),
-        state.rules_file.clone(),
-        state.settings_file.clone(),
-        Path::new(&folder),
-    )?;
-    let mut slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
-    if let Some(previous) = slot.take() {
-        previous.halt();
+    let mut started = Vec::with_capacity(folders.len());
+    for folder in &folders {
+        started.push(watch::start(
+            app.clone(),
+            state.service.clone(),
+            state.rules_file.clone(),
+            state.settings_file.clone(),
+            Path::new(folder),
+        )?);
     }
-    *slot = Some(started);
+    let mut running = state.sessions.lock().map_err(|_| IpcError::unavailable())?;
+    halt_all(&mut running);
+    *running = started;
     Ok(())
 }
 
 #[tauri::command]
 pub fn stop_watching(state: State<'_, AppState>) -> Result<(), IpcError> {
-    let mut slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
-    if let Some(session) = slot.take() {
-        session.halt();
-    }
+    let mut running = state.sessions.lock().map_err(|_| IpcError::unavailable())?;
+    halt_all(&mut running);
     Ok(())
 }
 
 #[tauri::command]
-pub fn watched_folder(state: State<'_, AppState>) -> Result<Option<String>, IpcError> {
-    let slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
-    Ok(slot
-        .as_ref()
-        .map(|session| session.folder().to_string_lossy().into_owned()))
+pub fn watched_folders(state: State<'_, AppState>) -> Result<Vec<String>, IpcError> {
+    let running = state.sessions.lock().map_err(|_| IpcError::unavailable())?;
+    Ok(running
+        .iter()
+        .map(|session| session.folder().to_string_lossy().into_owned())
+        .collect())
+}
+
+fn halt_all(running: &mut Vec<WatchSession>) {
+    for session in running.drain(..) {
+        session.halt();
+    }
 }
 
 #[tauri::command]
 pub async fn simulate(
     state: State<'_, AppState>,
     rules: Vec<Rule>,
-    folder: String,
+    folders: Vec<String>,
 ) -> Result<Vec<PlannedChange>, IpcError> {
     let service = state.service.clone();
     off_thread(move || {
-        with(&service, |tidyfile| {
-            tidyfile.simulate(&rules, &into_path(folder))
-        })
+        let roots = into_paths(folders);
+        with(&service, |tidyfile| tidyfile.simulate(&rules, &roots))
     })
     .await
 }
@@ -137,13 +142,14 @@ pub async fn simulate(
 pub async fn organize(
     state: State<'_, AppState>,
     rules: Vec<Rule>,
-    folder: String,
+    folders: Vec<String>,
 ) -> Result<BatchReport, IpcError> {
     let service = state.service.clone();
     let collision = current_collision(&state.settings_file);
     off_thread(move || {
+        let roots = into_paths(folders);
         with(&service, |tidyfile| {
-            tidyfile.organize(&rules, &into_path(folder), collision)
+            tidyfile.organize(&rules, &roots, collision)
         })
     })
     .await
@@ -224,8 +230,8 @@ pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Re
     off_thread(move || store::save(&path, &settings).map_err(IpcError::from)).await
 }
 
-fn into_path(folder: String) -> PathBuf {
-    PathBuf::from(folder)
+fn into_paths(folders: Vec<String>) -> Vec<PathBuf> {
+    folders.into_iter().map(PathBuf::from).collect()
 }
 
 fn with<T>(

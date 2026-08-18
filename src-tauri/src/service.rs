@@ -76,10 +76,10 @@ impl Tidyfile {
     pub fn simulate(
         &self,
         rules: &[Rule],
-        folder: &Path,
+        folders: &[PathBuf],
     ) -> Result<Vec<PlannedChange>, ServiceError> {
         Ok(self
-            .plan_folder(rules, folder)?
+            .plan_folders(rules, folders)?
             .iter()
             .map(describe)
             .collect())
@@ -88,10 +88,10 @@ impl Tidyfile {
     pub fn organize(
         &self,
         rules: &[Rule],
-        folder: &Path,
+        folders: &[PathBuf],
         on_collision: Collision,
     ) -> Result<BatchReport, ServiceError> {
-        let operations = self.plan_folder(rules, folder)?;
+        let operations = self.plan_folders(rules, folders)?;
         let batch = next_batch_id();
         let outcomes = self.executor.apply(&batch, &operations, on_collision)?;
         Ok(summarize(batch, &outcomes))
@@ -176,14 +176,14 @@ impl Tidyfile {
             .collect())
     }
 
-    fn plan_folder(&self, rules: &[Rule], folder: &Path) -> Result<Vec<Operation>, ServiceError> {
-        let root = paths::accept_watched_folder(folder)?;
+    fn plan_folders(
+        &self,
+        rules: &[Rule],
+        folders: &[PathBuf],
+    ) -> Result<Vec<Operation>, ServiceError> {
         let now = SystemTime::now();
         let mut operations = Vec::new();
-        let inside = scan(&root)
-            .into_iter()
-            .filter(|file| paths::is_within(&root, file));
-        for (index, file) in inside.enumerate() {
+        for (index, (root, file)) in files_in(folders)?.into_iter().enumerate() {
             let Ok(facts) = crate::rules::FileFacts::gather(&file, &root) else {
                 continue;
             };
@@ -195,6 +195,19 @@ impl Tidyfile {
         }
         Ok(operations)
     }
+}
+
+fn files_in(folders: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, ServiceError> {
+    let mut found = Vec::new();
+    for folder in folders {
+        let root = paths::accept_watched_folder(folder)?;
+        let inside = scan(&root)
+            .into_iter()
+            .filter(|file| paths::is_within(&root, file))
+            .map(|file| (root.clone(), file));
+        found.extend(inside);
+    }
+    Ok(found)
 }
 
 fn scan(root: &Path) -> Vec<PathBuf> {
@@ -335,7 +348,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let planned = service
-            .simulate(&[pdf_rule(out.path())], root.path())
+            .simulate(&[pdf_rule(out.path())], &[root.path().to_path_buf()])
             .unwrap();
 
         assert_eq!(planned.len(), 1);
@@ -353,9 +366,11 @@ mod tests {
         let rules = [pdf_rule(out.path())];
         let service = Tidyfile::in_memory().unwrap();
 
-        let planned = service.simulate(&rules, root.path()).unwrap();
+        let planned = service
+            .simulate(&rules, &[root.path().to_path_buf()])
+            .unwrap();
         let report = service
-            .organize(&rules, root.path(), Collision::Suffix)
+            .organize(&rules, &[root.path().to_path_buf()], Collision::Suffix)
             .unwrap();
 
         assert_eq!(report.applied, planned.len());
@@ -373,7 +388,11 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let report = service
-            .organize(&[pdf_rule(out.path())], root.path(), Collision::Suffix)
+            .organize(
+                &[pdf_rule(out.path())],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
             .unwrap();
         service.undo(&report.batch).unwrap();
 
@@ -389,7 +408,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let planned = service
-            .simulate(&[pdf_rule(out.path())], root.path())
+            .simulate(&[pdf_rule(out.path())], &[root.path().to_path_buf()])
             .unwrap();
 
         assert_eq!(planned.len(), 1);
@@ -404,7 +423,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let planned = service
-            .simulate(&[pdf_rule(out.path())], root.path())
+            .simulate(&[pdf_rule(out.path())], &[root.path().to_path_buf()])
             .unwrap();
 
         assert!(planned.is_empty(), "temporaries leaked into the plan");
@@ -415,7 +434,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
         let root = if cfg!(windows) { r"C:\Windows" } else { "/usr" };
 
-        let outcome = service.simulate(&[], Path::new(root));
+        let outcome = service.simulate(&[], &[PathBuf::from(root)]);
 
         assert!(matches!(
             outcome,
@@ -428,7 +447,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let service = Tidyfile::in_memory().unwrap();
 
-        let outcome = service.simulate(&[], &root.path().join("ghost"));
+        let outcome = service.simulate(&[], &[root.path().join("ghost")]);
 
         assert!(matches!(
             outcome,
@@ -452,7 +471,11 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let report = service
-            .organize(&[pdf_rule(out.path())], root.path(), Collision::Suffix)
+            .organize(
+                &[pdf_rule(out.path())],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
             .unwrap();
 
         assert_eq!((report.applied, report.skipped, report.failed), (0, 0, 0));
@@ -487,5 +510,78 @@ mod tests {
             found.is_empty(),
             "the scan walked through a junction and left the watched folder: {found:?}"
         );
+    }
+
+    #[test]
+    fn several_folders_are_planned_together_in_one_batch() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write(&first.path().join("one.pdf"), "a");
+        write(&second.path().join("two.pdf"), "b");
+        let service = Tidyfile::in_memory().unwrap();
+        let roots = [first.path().to_path_buf(), second.path().to_path_buf()];
+
+        let report = service
+            .organize(&[pdf_rule(out.path())], &roots, Collision::Suffix)
+            .unwrap();
+
+        assert_eq!(report.applied, 2);
+        assert_eq!(
+            service.activity(10).unwrap().len(),
+            1,
+            "both folders belong to a single undoable batch"
+        );
+    }
+
+    #[test]
+    fn one_bad_folder_stops_the_whole_plan_before_anything_moves() {
+        let good = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        let source = good.path().join("one.pdf");
+        write(&source, "a");
+        let service = Tidyfile::in_memory().unwrap();
+        let roots = [good.path().to_path_buf(), good.path().join("ghost")];
+
+        let outcome = service.organize(&[pdf_rule(out.path())], &roots, Collision::Suffix);
+
+        assert!(outcome.is_err());
+        assert!(
+            source.exists(),
+            "planning failed, so nothing should have been touched"
+        );
+    }
+
+    #[test]
+    fn the_counter_runs_across_folders_not_per_folder() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        write(&first.path().join("a.pdf"), "a");
+        write(&second.path().join("b.pdf"), "b");
+        let mut counted = pdf_rule(Path::new("/out"));
+        counted.actions = vec![Action::RenameTo {
+            template: "{counter}.{ext}".into(),
+        }];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let planned = service
+            .simulate(
+                &[counted],
+                &[first.path().to_path_buf(), second.path().to_path_buf()],
+            )
+            .unwrap();
+
+        let names: Vec<String> = planned
+            .iter()
+            .filter_map(|change| change.destination.clone())
+            .map(|path| {
+                PathBuf::from(path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["1.pdf", "2.pdf"]);
     }
 }

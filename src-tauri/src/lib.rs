@@ -36,7 +36,7 @@ pub fn run() -> tauri::Result<()> {
             ipc::operations,
             ipc::start_watching,
             ipc::stop_watching,
-            ipc::watched_folder
+            ipc::watched_folders
         ])
         .run(tauri::generate_context!())
 }

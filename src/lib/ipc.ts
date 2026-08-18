@@ -68,12 +68,12 @@ export function isIpcError(value: unknown): value is IpcError {
   return typeof candidate.code === "string" && typeof candidate.message === "string";
 }
 
-export function simulate(rules: Rule[], folder: string): Promise<PlannedChange[]> {
-  return invoke<PlannedChange[]>("simulate", { rules, folder });
+export function simulate(rules: Rule[], folders: string[]): Promise<PlannedChange[]> {
+  return invoke<PlannedChange[]>("simulate", { rules, folders });
 }
 
-export function organize(rules: Rule[], folder: string): Promise<BatchReport> {
-  return invoke<BatchReport>("organize", { rules, folder });
+export function organize(rules: Rule[], folders: string[]): Promise<BatchReport> {
+  return invoke<BatchReport>("organize", { rules, folders });
 }
 
 export function undo(batch: string): Promise<BatchReport> {
@@ -104,16 +104,16 @@ export function activity(limit = 50): Promise<ActivityEntry[]> {
   return invoke<ActivityEntry[]>("activity", { limit });
 }
 
-export function startWatching(folder: string): Promise<void> {
-  return invoke<void>("start_watching", { folder });
+export function startWatching(folders: string[]): Promise<void> {
+  return invoke<void>("start_watching", { folders });
 }
 
 export function stopWatching(): Promise<void> {
   return invoke<void>("stop_watching");
 }
 
-export function watchedFolder(): Promise<string | null> {
-  return invoke<string | null>("watched_folder");
+export function watchedFolders(): Promise<string[]> {
+  return invoke<string[]>("watched_folders");
 }
 
 export function settleInterrupted(): Promise<number> {
@@ -123,7 +123,7 @@ export function settleInterrupted(): Promise<number> {
 export type Collision = "suffix" | "skip";
 
 export interface Settings {
-  folder: string | null;
+  folders: string[];
   watching: boolean;
   onCollision: Collision;
 }

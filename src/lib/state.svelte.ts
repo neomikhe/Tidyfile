@@ -15,7 +15,7 @@ import {
   undo,
   undoOperation,
   operations as operationsIn,
-  watchedFolder,
+  watchedFolders,
   type ActivityEntry,
   type Collision,
   type PlannedChange,
@@ -38,7 +38,7 @@ function describe(error: unknown): string {
 
 export class Workspace {
   rules = $state<Rule[]>([]);
-  folder = $state<string | null>(null);
+  folders = $state<string[]>([]);
   preview = $state<PlannedChange[] | null>(null);
   history = $state<ActivityEntry[]>([]);
   status = $state<Status>({ kind: "idle" });
@@ -54,7 +54,11 @@ export class Workspace {
   }
 
   get canRun(): boolean {
-    return this.folder !== null && this.enabledRules.length > 0 && this.status.kind !== "working";
+    return (
+      this.folders.length > 0 &&
+      this.enabledRules.length > 0 &&
+      this.status.kind !== "working"
+    );
   }
 
   async initialise(): Promise<void> {
@@ -63,9 +67,9 @@ export class Workspace {
       this.history = await activity();
       this.unfinished = await interrupted();
       const settings = await loadSettings();
-      this.folder = settings.folder;
+      this.folders = settings.folders;
       this.onCollision = settings.onCollision;
-      this.watching = (await watchedFolder()) !== null;
+      this.watching = (await watchedFolders()).length > 0;
     });
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
@@ -86,13 +90,13 @@ export class Workspace {
   }
 
   async setWatching(active: boolean): Promise<void> {
-    if (active && this.folder === null) {
+    if (active && this.folders.length === 0) {
       return;
     }
-    const folder = this.folder;
+    const folders = this.folders;
     await this.attempt(async () => {
-      if (active && folder !== null) {
-        await startWatching(folder);
+      if (active) {
+        await startWatching(folders);
       } else {
         await stopWatching();
       }
@@ -104,8 +108,8 @@ export class Workspace {
   private async afterAutomaticTidy(): Promise<void> {
     await this.attempt(async () => {
       this.history = await activity();
-      if (this.folder !== null) {
-        this.preview = await simulate(this.enabledRules, this.folder);
+      if (this.folders.length > 0) {
+        this.preview = await simulate(this.enabledRules, this.folders);
       }
     });
   }
@@ -138,8 +142,18 @@ export class Workspace {
     await this.refreshPreview();
   }
 
-  async chooseFolder(picked: string): Promise<void> {
-    this.folder = picked;
+  async addFolder(picked: string): Promise<void> {
+    if (this.folders.includes(picked)) {
+      return;
+    }
+    this.folders = [...this.folders, picked];
+    this.preview = null;
+    await this.rememberSettings();
+    await this.refreshPreview();
+  }
+
+  async removeFolder(folder: string): Promise<void> {
+    this.folders = this.folders.filter((kept) => kept !== folder);
     this.preview = null;
     await this.rememberSettings();
     await this.refreshPreview();
@@ -152,7 +166,7 @@ export class Workspace {
 
   private async rememberSettings(): Promise<void> {
     const snapshot = {
-      folder: this.folder,
+      folders: this.folders,
       watching: this.watching,
       onCollision: this.onCollision,
     };
@@ -160,24 +174,24 @@ export class Workspace {
   }
 
   async refreshPreview(): Promise<void> {
-    if (this.folder === null) {
+    if (this.folders.length === 0) {
       return;
     }
-    const folder = this.folder;
+    const folders = this.folders;
     await this.attempt(async () => {
-      this.preview = await simulate(this.enabledRules, folder);
+      this.preview = await simulate(this.enabledRules, folders);
     });
   }
 
   async run(): Promise<void> {
-    if (this.folder === null) {
+    if (this.folders.length === 0) {
       return;
     }
-    const folder = this.folder;
+    const folders = this.folders;
     await this.attempt(async () => {
-      await organize(this.enabledRules, folder);
+      await organize(this.enabledRules, folders);
       this.history = await activity();
-      this.preview = await simulate(this.enabledRules, folder);
+      this.preview = await simulate(this.enabledRules, folders);
     });
   }
 
@@ -200,8 +214,8 @@ export class Workspace {
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);
       }
-      if (this.folder !== null) {
-        this.preview = await simulate(this.enabledRules, this.folder);
+      if (this.folders.length > 0) {
+        this.preview = await simulate(this.enabledRules, this.folders);
       }
     });
   }
@@ -213,8 +227,8 @@ export class Workspace {
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);
       }
-      if (this.folder !== null) {
-        this.preview = await simulate(this.enabledRules, this.folder);
+      if (this.folders.length > 0) {
+        this.preview = await simulate(this.enabledRules, this.folders);
       }
     });
   }
