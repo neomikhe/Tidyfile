@@ -1,5 +1,6 @@
 pub mod condition;
 pub mod evaluator;
+pub mod patterns;
 
 pub use condition::{Condition, ConditionError, FileFacts};
 pub use evaluator::{EvaluationError, PlanContext, plan};

@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use globset::GlobBuilder;
-use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
+use super::patterns;
+
 const MAX_PATTERN_LENGTH: usize = 512;
-const REGEX_SIZE_LIMIT: usize = 64 * 1024;
 const SECONDS_PER_DAY: u64 = 86_400;
 
 #[derive(Debug, thiserror::Error)]
@@ -106,22 +105,13 @@ fn matches_contains(facts: &FileFacts, text: &str) -> bool {
 
 fn matches_glob(facts: &FileFacts, pattern: &str) -> Result<bool, ConditionError> {
     reject_oversized(pattern)?;
-    let glob = GlobBuilder::new(pattern)
-        .case_insensitive(true)
-        .literal_separator(true)
-        .build()
-        .map_err(|_| ConditionError::InvalidGlob)?;
-    Ok(facts
-        .name()
-        .is_some_and(|name| glob.compile_matcher().is_match(name)))
+    let glob = patterns::glob(pattern)?;
+    Ok(facts.name().is_some_and(|name| glob.is_match(name)))
 }
 
 fn matches_regex(facts: &FileFacts, pattern: &str) -> Result<bool, ConditionError> {
     reject_oversized(pattern)?;
-    let regex = RegexBuilder::new(pattern)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .build()
-        .map_err(|_| ConditionError::InvalidRegex)?;
+    let regex = patterns::regex(pattern)?;
     Ok(facts.name().is_some_and(|name| regex.is_match(name)))
 }
 
@@ -282,5 +272,48 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("nameMatchesGlob"));
         assert_eq!(serde_json::from_str::<Condition>(&json).unwrap(), original);
+    }
+
+    fn many_facts(count: usize) -> Vec<FileFacts> {
+        (0..count)
+            .map(|index| facts(&format!("Screenshot {index}.png"), 1, 0))
+            .collect()
+    }
+
+    fn elapsed_millis(condition: &Condition, files: &[FileFacts]) -> u128 {
+        let started = std::time::Instant::now();
+        for file in files {
+            let _ = condition.matches(file, now());
+        }
+        started.elapsed().as_millis()
+    }
+
+    #[test]
+    #[ignore = "measurement, run with: cargo test -- --ignored --nocapture"]
+    fn measure_cost_of_recompiling_patterns_per_file() {
+        const FILES: usize = 10_000;
+        let files = many_facts(FILES);
+
+        let extension = Condition::Extension {
+            any_of: vec!["png".into()],
+        };
+        let contains = Condition::NameContains {
+            text: "screenshot".into(),
+        };
+        let glob = Condition::NameMatchesGlob {
+            pattern: "Screenshot*.png".into(),
+        };
+        let regex = Condition::NameMatchesRegex {
+            pattern: r"^Screenshot \d+\.png$".into(),
+        };
+
+        println!("--- {FILES} files, one condition each ---");
+        println!(
+            "extension      {:>6} ms",
+            elapsed_millis(&extension, &files)
+        );
+        println!("nameContains   {:>6} ms", elapsed_millis(&contains, &files));
+        println!("glob           {:>6} ms", elapsed_millis(&glob, &files));
+        println!("regex          {:>6} ms", elapsed_millis(&regex, &files));
     }
 }
