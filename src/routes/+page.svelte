@@ -19,6 +19,7 @@
 
   onMount(() => {
     void workspace.initialise();
+    return () => workspace.dispose();
   });
 
   async function createRule(): Promise<void> {
@@ -193,6 +194,21 @@
       <p class="note">
         System folders, drive roots and your whole home folder cannot be watched.
       </p>
+
+      <h3>Watch continuously</h3>
+      <label class="switch">
+        <input
+          type="checkbox"
+          checked={workspace.watching}
+          disabled={workspace.folder === null || workspace.status.kind === "working"}
+          onchange={(event) => workspace.setWatching(event.currentTarget.checked)}
+        />
+        <span>Tidy new files as they arrive</span>
+      </label>
+      <p class="note">
+        While this is on, files that appear in the folder are tidied by your enabled rules without
+        asking. Everything still goes through the history, so any batch can be undone.
+      </p>
     </section>
   {/if}
 </main>
@@ -341,6 +357,13 @@
     border-radius: 0.375rem;
     padding: 0.6rem 0.8rem;
     margin-block: 1rem 0;
+  }
+
+  .switch {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
   }
 
   .summary {

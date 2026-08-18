@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::paths::PathError;
 use crate::rules::Rule;
 use crate::service::{ActivityEntry, BatchReport, PlannedChange, ServiceError, Tidyfile};
 use crate::store::{self, StoreError};
+use crate::watch::{self, WatchSession};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,12 +54,14 @@ fn code_for(error: &ServiceError) -> &'static str {
         ServiceError::Rules(_) => "invalidRule",
         ServiceError::Journal(_) => "historyUnavailable",
         ServiceError::Executor(_) => "executionFailed",
+        ServiceError::Watcher(_) => "watchFailed",
     }
 }
 
 pub struct AppState {
     service: Arc<Mutex<Tidyfile>>,
     rules_file: PathBuf,
+    session: Mutex<Option<WatchSession>>,
 }
 
 impl AppState {
@@ -66,8 +69,46 @@ impl AppState {
         Ok(Self {
             service: Arc::new(Mutex::new(Tidyfile::open(&folder.join("journal.sqlite"))?)),
             rules_file: folder.join("rules.json"),
+            session: Mutex::new(None),
         })
     }
+}
+
+#[tauri::command]
+pub fn start_watching(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder: String,
+) -> Result<(), IpcError> {
+    let started = watch::start(
+        app,
+        state.service.clone(),
+        state.rules_file.clone(),
+        Path::new(&folder),
+    )?;
+    let mut slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
+    if let Some(previous) = slot.take() {
+        previous.halt();
+    }
+    *slot = Some(started);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_watching(state: State<'_, AppState>) -> Result<(), IpcError> {
+    let mut slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
+    if let Some(session) = slot.take() {
+        session.halt();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn watched_folder(state: State<'_, AppState>) -> Result<Option<String>, IpcError> {
+    let slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
+    Ok(slot
+        .as_ref()
+        .map(|session| session.folder().to_string_lossy().into_owned()))
 }
 
 #[tauri::command]

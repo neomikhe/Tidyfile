@@ -52,6 +52,7 @@ export type ErrorCode =
   | "executionFailed"
   | "rulesUnreachable"
   | "rulesMalformed"
+  | "watchFailed"
   | "unavailable";
 
 export interface IpcError {
@@ -101,4 +102,16 @@ export function saveRules(rules: Rule[]): Promise<void> {
 
 export function activity(limit = 50): Promise<ActivityEntry[]> {
   return invoke<ActivityEntry[]>("activity", { limit });
+}
+
+export function startWatching(folder: string): Promise<void> {
+  return invoke<void>("start_watching", { folder });
+}
+
+export function stopWatching(): Promise<void> {
+  return invoke<void>("stop_watching");
+}
+
+export function watchedFolder(): Promise<string | null> {
+  return invoke<string | null>("watched_folder");
 }

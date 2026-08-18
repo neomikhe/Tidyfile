@@ -6,6 +6,7 @@ pub mod rules;
 pub mod service;
 pub mod store;
 pub mod templates;
+pub mod watch;
 pub mod watcher;
 
 use tauri::Manager;
@@ -26,7 +27,10 @@ pub fn run() -> tauri::Result<()> {
             ipc::interrupted,
             ipc::load_rules,
             ipc::save_rules,
-            ipc::activity
+            ipc::activity,
+            ipc::start_watching,
+            ipc::stop_watching,
+            ipc::watched_folder
         ])
         .run(tauri::generate_context!())
 }

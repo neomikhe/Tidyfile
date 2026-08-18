@@ -1,3 +1,4 @@
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   activity,
   isIpcError,
@@ -5,7 +6,10 @@ import {
   organize,
   saveRules,
   simulate,
+  startWatching,
+  stopWatching,
   undo,
+  watchedFolder,
   type ActivityEntry,
   type PlannedChange,
   type Rule,
@@ -30,6 +34,8 @@ export class Workspace {
   preview = $state<PlannedChange[] | null>(null);
   history = $state<ActivityEntry[]>([]);
   status = $state<Status>({ kind: "idle" });
+  watching = $state(false);
+  private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
     return this.rules.filter((rule) => rule.enabled);
@@ -43,6 +49,43 @@ export class Workspace {
     await this.attempt(async () => {
       this.rules = await loadRules();
       this.history = await activity();
+      const watched = await watchedFolder();
+      if (watched !== null) {
+        this.folder = watched;
+        this.watching = true;
+      }
+    });
+    this.unlisten = await listen("tidied", () => {
+      void this.afterAutomaticTidy();
+    });
+  }
+
+  dispose(): void {
+    this.unlisten?.();
+    this.unlisten = null;
+  }
+
+  async setWatching(active: boolean): Promise<void> {
+    if (active && this.folder === null) {
+      return;
+    }
+    const folder = this.folder;
+    await this.attempt(async () => {
+      if (active && folder !== null) {
+        await startWatching(folder);
+      } else {
+        await stopWatching();
+      }
+      this.watching = active;
+    });
+  }
+
+  private async afterAutomaticTidy(): Promise<void> {
+    await this.attempt(async () => {
+      this.history = await activity();
+      if (this.folder !== null) {
+        this.preview = await simulate(this.enabledRules, this.folder);
+      }
     });
   }
 

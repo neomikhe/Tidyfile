@@ -25,6 +25,8 @@ pub enum ServiceError {
     Journal(#[from] JournalError),
     #[error("the operation could not be carried out")]
     Executor(#[from] crate::executor::ExecutorError),
+    #[error("the folder could not be watched")]
+    Watcher(#[from] crate::watcher::WatcherError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -103,6 +105,31 @@ impl Tidyfile {
             .iter()
             .map(|record| describe(&record.operation))
             .collect())
+    }
+
+    pub fn organize_file(
+        &self,
+        rules: &[Rule],
+        root: &Path,
+        file: &Path,
+    ) -> Result<BatchReport, ServiceError> {
+        if !paths::is_within(root, file) {
+            return Ok(nothing_happened());
+        }
+        let Ok(facts) = crate::rules::FileFacts::gather(file, root) else {
+            return Ok(nothing_happened());
+        };
+        let context = PlanContext {
+            now: SystemTime::now(),
+            counter: 1,
+        };
+        let operations = plan(rules, &facts, context)?;
+        if operations.is_empty() {
+            return Ok(nothing_happened());
+        }
+        let batch = next_batch_id();
+        let outcomes = self.executor.apply(&batch, &operations)?;
+        Ok(summarize(batch, &outcomes))
     }
 
     pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
@@ -194,6 +221,15 @@ fn summarize(batch: String, outcomes: &[Outcome]) -> BatchReport {
 
 fn count(outcomes: &[Outcome], predicate: impl Fn(&Outcome) -> bool) -> usize {
     outcomes.iter().filter(|outcome| predicate(outcome)).count()
+}
+
+fn nothing_happened() -> BatchReport {
+    BatchReport {
+        batch: String::new(),
+        applied: 0,
+        skipped: 0,
+        failed: 0,
+    }
 }
 
 fn next_batch_id() -> String {
