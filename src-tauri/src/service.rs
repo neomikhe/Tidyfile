@@ -159,7 +159,10 @@ impl Tidyfile {
         let root = paths::accept_watched_folder(folder)?;
         let now = SystemTime::now();
         let mut operations = Vec::new();
-        for (index, file) in scan(&root).into_iter().enumerate() {
+        let inside = scan(&root)
+            .into_iter()
+            .filter(|file| paths::is_within(&root, file));
+        for (index, file) in inside.enumerate() {
             let Ok(facts) = crate::rules::FileFacts::gather(&file, &root) else {
                 continue;
             };
@@ -407,5 +410,36 @@ mod tests {
             .unwrap();
 
         assert_eq!((report.applied, report.skipped, report.failed), (0, 0, 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_junction_does_not_take_the_scan_outside() {
+        let root = TempDir::new().unwrap();
+        let watched = root.path().join("watched");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&watched).unwrap();
+        write(&outside.join("secret.pdf"), "outside the watched folder");
+
+        let link = watched.join("escape");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "could not create the junction");
+
+        assert!(
+            fs::symlink_metadata(&link).unwrap().is_symlink(),
+            "Rust must report a junction as a symlink, or the scan filter misses it"
+        );
+
+        let found = scan(&watched);
+
+        assert!(
+            found.is_empty(),
+            "the scan walked through a junction and left the watched folder: {found:?}"
+        );
     }
 }
