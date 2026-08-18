@@ -13,10 +13,13 @@ import {
   startWatching,
   stopWatching,
   undo,
+  undoOperation,
+  operations as operationsIn,
   watchedFolder,
   type ActivityEntry,
   type Collision,
   type PlannedChange,
+  type RecordedChange,
   type Rule,
 } from "./ipc";
 
@@ -42,6 +45,8 @@ export class Workspace {
   watching = $state(false);
   unfinished = $state<PlannedChange[]>([]);
   onCollision = $state<Collision>("suffix");
+  expanded = $state<string | null>(null);
+  details = $state<RecordedChange[]>([]);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -176,10 +181,38 @@ export class Workspace {
     });
   }
 
+  async expand(batch: string): Promise<void> {
+    if (this.expanded === batch) {
+      this.expanded = null;
+      this.details = [];
+      return;
+    }
+    this.expanded = batch;
+    await this.attempt(async () => {
+      this.details = await operationsIn(batch);
+    });
+  }
+
+  async revertOne(id: number): Promise<void> {
+    await this.attempt(async () => {
+      await undoOperation(id);
+      this.history = await activity();
+      if (this.expanded !== null) {
+        this.details = await operationsIn(this.expanded);
+      }
+      if (this.folder !== null) {
+        this.preview = await simulate(this.enabledRules, this.folder);
+      }
+    });
+  }
+
   async revert(batch: string): Promise<void> {
     await this.attempt(async () => {
       await undo(batch);
       this.history = await activity();
+      if (this.expanded !== null) {
+        this.details = await operationsIn(this.expanded);
+      }
       if (this.folder !== null) {
         this.preview = await simulate(this.enabledRules, this.folder);
       }

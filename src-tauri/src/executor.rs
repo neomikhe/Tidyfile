@@ -36,6 +36,7 @@ pub enum Collision {
 pub enum SkipReason {
     SourceVanished,
     DestinationTaken,
+    NothingToUndo,
     RestoreUnsupported,
     NotFoundInTrash,
 }
@@ -119,16 +120,24 @@ impl Executor {
 
     pub fn undo_batch(&self, batch: &str) -> Result<Vec<Outcome>, ExecutorError> {
         let applied = self.journal.applied_in_batch(batch)?;
-        let undo_batch = format!("{batch}:undo");
-        let mut outcomes = Vec::with_capacity(applied.len());
-        for record in &applied {
-            let outcome = self.undo_one(&undo_batch, &record.operation)?;
-            if matches!(outcome, Outcome::Applied(_) | Outcome::Skipped(_)) {
-                self.journal.mark(record.id, State::Undone, None)?;
-            }
-            outcomes.push(outcome);
+        applied
+            .iter()
+            .map(|record| self.undo_operation(record.id))
+            .collect()
+    }
+
+    pub fn undo_operation(&self, id: i64) -> Result<Outcome, ExecutorError> {
+        let Some(record) = self.journal.operation(id)? else {
+            return Ok(Outcome::Skipped(SkipReason::NothingToUndo));
+        };
+        if record.state != State::Done {
+            return Ok(Outcome::Skipped(SkipReason::NothingToUndo));
         }
-        Ok(outcomes)
+        let outcome = self.undo_one(&format!("{}:undo", record.batch), &record.operation)?;
+        if matches!(outcome, Outcome::Applied(_) | Outcome::Skipped(_)) {
+            self.journal.mark(id, State::Undone, None)?;
+        }
+        Ok(outcome)
     }
 
     fn undo_one(&self, batch: &str, operation: &Operation) -> Result<Outcome, ExecutorError> {
@@ -775,5 +784,70 @@ mod tests {
                 .is_empty(),
             "a skipped operation never happened, so there is nothing to revert"
         );
+    }
+
+    #[test]
+    fn one_operation_can_be_undone_without_touching_the_rest_of_the_batch() {
+        let root = TempDir::new().unwrap();
+        let names = ["a.txt", "b.txt"];
+        let operations: Vec<Operation> = names
+            .iter()
+            .map(|name| {
+                let from = root.path().join(name);
+                write(&from, name);
+                Operation::Move {
+                    from,
+                    to: root.path().join("out").join(name),
+                }
+            })
+            .collect();
+        let executor = executor();
+        executor
+            .apply("batch-1", &operations, Collision::Suffix)
+            .unwrap();
+
+        let applied = executor.journal().applied_in_batch("batch-1").unwrap();
+        let chosen = applied
+            .iter()
+            .find(|record| record.operation.source().file_name().unwrap() == "a.txt");
+        executor.undo_operation(chosen.unwrap().id).unwrap();
+
+        assert!(root.path().join("a.txt").exists(), "a.txt was not restored");
+        assert!(
+            root.path().join("out/b.txt").exists(),
+            "b.txt should not have moved back"
+        );
+    }
+
+    #[test]
+    fn undoing_the_same_operation_twice_is_a_no_op() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("report.pdf");
+        write(&source, "content");
+        let executor = executor();
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: root.path().join("out/report.pdf"),
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+        let id = executor.journal().applied_in_batch("batch-1").unwrap()[0].id;
+
+        executor.undo_operation(id).unwrap();
+        let again = executor.undo_operation(id).unwrap();
+
+        assert_eq!(again, Outcome::Skipped(SkipReason::NothingToUndo));
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn undoing_an_unknown_operation_reports_that_there_is_nothing_to_do() {
+        let outcome = executor().undo_operation(9_999).unwrap();
+
+        assert_eq!(outcome, Outcome::Skipped(SkipReason::NothingToUndo));
     }
 }

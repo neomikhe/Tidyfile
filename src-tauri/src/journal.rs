@@ -72,6 +72,17 @@ pub enum State {
 }
 
 impl State {
+    pub fn from_text(text: &str) -> Option<Self> {
+        match text {
+            "planned" => Some(Self::Planned),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            "undone" => Some(Self::Undone),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+
     fn as_text(self) -> &'static str {
         match self {
             Self::Planned => "planned",
@@ -88,6 +99,7 @@ pub struct RecordedOperation {
     pub id: i64,
     pub batch: String,
     pub operation: Operation,
+    pub state: State,
 }
 
 pub struct Journal {
@@ -138,10 +150,27 @@ impl Journal {
 
     pub fn interrupted(&self) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination FROM operations
+            "SELECT id, batch, kind, source, destination, state FROM operations
              WHERE state = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([State::Planned.as_text()], read_row)?;
+        collect(rows)
+    }
+
+    pub fn operation(&self, id: i64) -> Result<Option<RecordedOperation>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, batch, kind, source, destination, state FROM operations WHERE id = ?1",
+        )?;
+        let rows = statement.query_map([id], read_row)?;
+        Ok(collect(rows)?.into_iter().next())
+    }
+
+    pub fn operations_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, batch, kind, source, destination, state FROM operations
+             WHERE batch = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([batch], read_row)?;
         collect(rows)
     }
 
@@ -163,7 +192,7 @@ impl Journal {
 
     pub fn applied_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination FROM operations
+            "SELECT id, batch, kind, source, destination, state FROM operations
              WHERE batch = ?1 AND state = ?2 ORDER BY id DESC",
         )?;
         let rows = statement.query_map(params![batch, State::Done.as_text()], read_row)?;
@@ -209,7 +238,7 @@ impl Journal {
     }
 }
 
-type Row = (i64, String, String, String, Option<String>);
+type Row = (i64, String, String, String, Option<String>, String);
 
 fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
     Ok((
@@ -218,6 +247,7 @@ fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
     ))
 }
 
@@ -227,11 +257,12 @@ where
 {
     let mut recorded = Vec::new();
     for row in rows {
-        let (id, batch, kind, source, destination) = row?;
+        let (id, batch, kind, source, destination, state) = row?;
         recorded.push(RecordedOperation {
             id,
             batch,
             operation: rebuild(&kind, source, destination)?,
+            state: State::from_text(&state).ok_or(JournalError::UnknownKind)?,
         });
     }
     Ok(recorded)

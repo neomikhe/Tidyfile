@@ -7,7 +7,9 @@ use tauri::{AppHandle, State};
 use crate::executor::Collision;
 use crate::paths::PathError;
 use crate::rules::Rule;
-use crate::service::{ActivityEntry, BatchReport, PlannedChange, ServiceError, Tidyfile};
+use crate::service::{
+    ActivityEntry, BatchReport, PlannedChange, RecordedChange, ServiceError, Tidyfile,
+};
 use crate::settings::Settings;
 use crate::store::{self, StoreError};
 use crate::watch::{self, WatchSession};
@@ -157,6 +159,21 @@ pub async fn undo(state: State<'_, AppState>, batch: String) -> Result<BatchRepo
 pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange>, IpcError> {
     let service = state.service.clone();
     off_thread(move || with(&service, Tidyfile::interrupted)).await
+}
+
+#[tauri::command]
+pub async fn undo_operation(state: State<'_, AppState>, id: i64) -> Result<BatchReport, IpcError> {
+    let service = state.service.clone();
+    off_thread(move || with(&service, |tidyfile| tidyfile.undo_operation(id))).await
+}
+
+#[tauri::command]
+pub async fn operations(
+    state: State<'_, AppState>,
+    batch: String,
+) -> Result<Vec<RecordedChange>, IpcError> {
+    let service = state.service.clone();
+    off_thread(move || with(&service, |tidyfile| tidyfile.operations(&batch))).await
 }
 
 #[tauri::command]

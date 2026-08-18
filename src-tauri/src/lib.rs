@@ -32,6 +32,8 @@ pub fn run() -> tauri::Result<()> {
             ipc::activity,
             ipc::load_settings,
             ipc::save_settings,
+            ipc::undo_operation,
+            ipc::operations,
             ipc::start_watching,
             ipc::stop_watching,
             ipc::watched_folder

@@ -135,3 +135,20 @@ export function loadSettings(): Promise<Settings> {
 export function saveSettings(settings: Settings): Promise<void> {
   return invoke<void>("save_settings", { settings });
 }
+
+export interface RecordedChange {
+  id: number;
+  kind: ChangeKind;
+  source: string;
+  destination: string | null;
+  state: string;
+  undoable: boolean;
+}
+
+export function operations(batch: string): Promise<RecordedChange[]> {
+  return invoke<RecordedChange[]>("operations", { batch });
+}
+
+export function undoOperation(id: number): Promise<BatchReport> {
+  return invoke<BatchReport>("undo_operation", { id });
+}

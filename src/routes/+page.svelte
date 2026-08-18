@@ -195,19 +195,49 @@
       {:else}
         <ul class="history">
           {#each workspace.history as entry (entry.batch)}
-            <li>
-              <span class="when">{moment(entry.recordedAt)}</span>
-              <span class="counts">
-                {entry.done} applied
-                {#if entry.failed > 0}, {entry.failed} failed{/if}
-                {#if entry.undone > 0}, {entry.undone} undone{/if}
-              </span>
-              <button
-                disabled={entry.done === 0 || workspace.status.kind === "working"}
-                onclick={() => workspace.revert(entry.batch)}
-              >
-                Undo
-              </button>
+            <li class="batch">
+              <div class="summary-row">
+                <span class="when">{moment(entry.recordedAt)}</span>
+                <span class="counts">
+                  {entry.done} applied
+                  {#if entry.failed > 0}, {entry.failed} failed{/if}
+                  {#if entry.undone > 0}, {entry.undone} undone{/if}
+                </span>
+                <button
+                  aria-expanded={workspace.expanded === entry.batch}
+                  onclick={() => workspace.expand(entry.batch)}
+                >
+                  {workspace.expanded === entry.batch ? "Hide files" : "Show files"}
+                </button>
+                <button
+                  disabled={entry.done === 0 || workspace.status.kind === "working"}
+                  onclick={() => workspace.revert(entry.batch)}
+                >
+                  Undo all
+                </button>
+              </div>
+
+              {#if workspace.expanded === entry.batch}
+                <ul class="details">
+                  {#each workspace.details as change (change.id)}
+                    <li>
+                      <span class="kind {change.kind}">{change.kind}</span>
+                      <span class="from">{fileName(change.source)}</span>
+                      {#if change.destination !== null}
+                        <span class="arrow" aria-hidden="true">-&gt;</span>
+                        <span class="to">{change.destination}</span>
+                      {/if}
+                      <span class="detail">{change.state}</span>
+                      <button
+                        disabled={!change.undoable || workspace.status.kind === "working"}
+                        onclick={() => workspace.revertOne(change.id)}
+                      >
+                        Undo
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -335,9 +365,16 @@
     border-radius: 0.375rem;
   }
 
-  li.rule {
+  li.rule,
+  li.batch {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .details {
+    margin-top: 0.5rem;
+    padding-left: 0.75rem;
+    border-left: 2px solid;
   }
 
   .summary-row {

@@ -145,6 +145,21 @@ impl Tidyfile {
         Ok(summarize(batch, &outcomes))
     }
 
+    pub fn undo_operation(&self, id: i64) -> Result<BatchReport, ServiceError> {
+        let outcome = self.executor.undo_operation(id)?;
+        Ok(summarize(String::new(), std::slice::from_ref(&outcome)))
+    }
+
+    pub fn operations(&self, batch: &str) -> Result<Vec<RecordedChange>, ServiceError> {
+        Ok(self
+            .executor
+            .journal()
+            .operations_in_batch(batch)?
+            .iter()
+            .map(recorded)
+            .collect())
+    }
+
     pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
         Ok(self
             .executor
@@ -206,6 +221,29 @@ fn collect(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         } else if path.is_file() && !is_temporary(&path) {
             found.push(path);
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedChange {
+    pub id: i64,
+    pub kind: String,
+    pub source: String,
+    pub destination: Option<String>,
+    pub state: String,
+    pub undoable: bool,
+}
+
+fn recorded(record: &crate::journal::RecordedOperation) -> RecordedChange {
+    let change = describe(&record.operation);
+    RecordedChange {
+        id: record.id,
+        kind: change.kind,
+        source: change.source,
+        destination: change.destination,
+        state: format!("{:?}", record.state).to_lowercase(),
+        undoable: record.state == crate::journal::State::Done,
     }
 }
 
