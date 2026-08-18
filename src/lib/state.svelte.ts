@@ -4,8 +4,10 @@ import {
   interrupted,
   isIpcError,
   loadRules,
+  loadSettings,
   organize,
   saveRules,
+  saveSettings,
   settleInterrupted,
   simulate,
   startWatching,
@@ -13,6 +15,7 @@ import {
   undo,
   watchedFolder,
   type ActivityEntry,
+  type Collision,
   type PlannedChange,
   type Rule,
 } from "./ipc";
@@ -38,6 +41,7 @@ export class Workspace {
   status = $state<Status>({ kind: "idle" });
   watching = $state(false);
   unfinished = $state<PlannedChange[]>([]);
+  onCollision = $state<Collision>("suffix");
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -53,11 +57,10 @@ export class Workspace {
       this.rules = await loadRules();
       this.history = await activity();
       this.unfinished = await interrupted();
-      const watched = await watchedFolder();
-      if (watched !== null) {
-        this.folder = watched;
-        this.watching = true;
-      }
+      const settings = await loadSettings();
+      this.folder = settings.folder;
+      this.onCollision = settings.onCollision;
+      this.watching = (await watchedFolder()) !== null;
     });
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
@@ -90,6 +93,7 @@ export class Workspace {
       }
       this.watching = active;
     });
+    await this.rememberSettings();
   }
 
   private async afterAutomaticTidy(): Promise<void> {
@@ -132,7 +136,22 @@ export class Workspace {
   async chooseFolder(picked: string): Promise<void> {
     this.folder = picked;
     this.preview = null;
+    await this.rememberSettings();
     await this.refreshPreview();
+  }
+
+  async setCollision(policy: Collision): Promise<void> {
+    this.onCollision = policy;
+    await this.rememberSettings();
+  }
+
+  private async rememberSettings(): Promise<void> {
+    const snapshot = {
+      folder: this.folder,
+      watching: this.watching,
+      onCollision: this.onCollision,
+    };
+    await this.attempt(() => saveSettings(snapshot));
   }
 
   async refreshPreview(): Promise<void> {

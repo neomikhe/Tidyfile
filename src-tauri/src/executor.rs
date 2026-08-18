@@ -24,9 +24,18 @@ enum ActionError {
     NoFreeName,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Collision {
+    #[default]
+    Suffix,
+    Skip,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     SourceVanished,
+    DestinationTaken,
     RestoreUnsupported,
     NotFoundInTrash,
 }
@@ -55,26 +64,39 @@ impl Executor {
         &self,
         batch: &str,
         operations: &[Operation],
+        on_collision: Collision,
     ) -> Result<Vec<Outcome>, ExecutorError> {
         operations
             .iter()
-            .map(|operation| self.apply_one(batch, operation))
+            .map(|operation| self.apply_one(batch, operation, on_collision))
             .collect()
     }
 
-    fn apply_one(&self, batch: &str, operation: &Operation) -> Result<Outcome, ExecutorError> {
+    fn apply_one(
+        &self,
+        batch: &str,
+        operation: &Operation,
+        on_collision: Collision,
+    ) -> Result<Outcome, ExecutorError> {
         if !operation.source().exists() {
             return Ok(Outcome::Skipped(SkipReason::SourceVanished));
         }
         let id = self.journal.record_planned(batch, operation)?;
-        let claimed = match claim(operation) {
-            Ok(claimed) => claimed,
+        let claimed = match claim(operation, on_collision) {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) => return self.step_aside(id),
             Err(error) => return self.give_up(id, &error.to_string()),
         };
         if let Some(destination) = destination_of(&claimed) {
             self.journal.retarget(id, destination)?;
         }
         self.run_and_record(id, claimed)
+    }
+
+    fn step_aside(&self, id: i64) -> Result<Outcome, ExecutorError> {
+        self.journal
+            .mark(id, State::Skipped, Some("destination already exists"))?;
+        Ok(Outcome::Skipped(SkipReason::DestinationTaken))
     }
 
     fn run_and_record(&self, id: i64, operation: Operation) -> Result<Outcome, ExecutorError> {
@@ -117,10 +139,13 @@ impl Executor {
                     from: to.clone(),
                     to: from.clone(),
                 },
+                Collision::Suffix,
             ),
-            Operation::Copy { to, .. } => {
-                self.apply_one(batch, &Operation::Trash { from: to.clone() })
-            }
+            Operation::Copy { to, .. } => self.apply_one(
+                batch,
+                &Operation::Trash { from: to.clone() },
+                Collision::Suffix,
+            ),
             Operation::Trash { from } => Ok(restore::from_trash(from)),
         }
     }
@@ -155,33 +180,42 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), ActionError> {
     Ok(())
 }
 
-fn claim(operation: &Operation) -> Result<Operation, ActionError> {
+fn claim(operation: &Operation, on_collision: Collision) -> Result<Option<Operation>, ActionError> {
     let Some(desired) = destination_of(operation) else {
-        return Ok(operation.clone());
+        return Ok(Some(operation.clone()));
     };
-    Ok(retarget(operation, reserve(desired)?))
+    let Some(claimed) = reserve(desired, on_collision)? else {
+        return Ok(None);
+    };
+    Ok(Some(retarget(operation, claimed)))
 }
 
-fn reserve(desired: &Path) -> Result<PathBuf, ActionError> {
+fn reserve(desired: &Path, on_collision: Collision) -> Result<Option<PathBuf>, ActionError> {
     if let Some(parent) = desired.parent() {
         fs::create_dir_all(parent)?;
     }
-    for candidate in candidates(desired) {
+    for candidate in candidates(desired, on_collision) {
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&candidate)
         {
-            Ok(_) => return Ok(candidate),
+            Ok(_) => return Ok(Some(candidate)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(ActionError::Move(error)),
         }
     }
-    Err(ActionError::NoFreeName)
+    match on_collision {
+        Collision::Skip => Ok(None),
+        Collision::Suffix => Err(ActionError::NoFreeName),
+    }
 }
 
-fn candidates(desired: &Path) -> Vec<PathBuf> {
+fn candidates(desired: &Path, on_collision: Collision) -> Vec<PathBuf> {
     let mut names = vec![desired.to_path_buf()];
+    if on_collision == Collision::Skip {
+        return names;
+    }
     let (Some(parent), Some(stem)) = (desired.parent(), desired.file_stem()) else {
         return names;
     };
@@ -317,7 +351,9 @@ mod tests {
             from: source.clone(),
             to: destination.clone(),
         };
-        executor.apply("batch-1", &[operation]).unwrap();
+        executor
+            .apply("batch-1", &[operation], Collision::Suffix)
+            .unwrap();
         assert!(destination.exists() && !source.exists());
 
         executor.undo_batch("batch-1").unwrap();
@@ -341,6 +377,7 @@ mod tests {
                     from: source,
                     to: occupied.clone(),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -364,6 +401,7 @@ mod tests {
                     from: root.path().join("ghost.pdf"),
                     to: root.path().join("out/ghost.pdf"),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -385,6 +423,7 @@ mod tests {
                     from: source,
                     to: root.path().join("out/a.txt"),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -413,6 +452,7 @@ mod tests {
                     from: source.clone(),
                     to: destination,
                 }],
+                Collision::Suffix,
             )
             .unwrap();
         executor.undo_batch("batch-1").unwrap();
@@ -438,7 +478,9 @@ mod tests {
             .collect();
         let executor = executor();
 
-        executor.apply("batch-1", &operations).unwrap();
+        executor
+            .apply("batch-1", &operations, Collision::Suffix)
+            .unwrap();
         executor.undo_batch("batch-1").unwrap();
 
         for name in ["a.txt", "b.txt", "c.txt"] {
@@ -459,6 +501,7 @@ mod tests {
                 &[Operation::Trash {
                     from: doomed.clone(),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -496,6 +539,7 @@ mod tests {
                     from: source.clone(),
                     to: duplicate.clone(),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -518,6 +562,7 @@ mod tests {
                     from: source.clone(),
                     to: duplicate.clone(),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
         executor.undo_batch("batch-1").unwrap();
@@ -545,6 +590,7 @@ mod tests {
                     from: source,
                     to: occupied.clone(),
                 }],
+                Collision::Suffix,
             )
             .unwrap();
 
@@ -596,7 +642,7 @@ mod tests {
         let occupied = root.path().join("notes.txt");
         write(&occupied, "existing");
 
-        let claimed = reserve(&occupied).unwrap();
+        let claimed = reserve(&occupied, Collision::Suffix).unwrap().unwrap();
 
         assert_ne!(claimed, occupied);
         assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
@@ -611,8 +657,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let desired = root.path().join("report.pdf");
 
-        let first = reserve(&desired).unwrap();
-        let second = reserve(&desired).unwrap();
+        let first = reserve(&desired, Collision::Suffix).unwrap().unwrap();
+        let second = reserve(&desired, Collision::Suffix).unwrap().unwrap();
 
         assert_eq!(first, desired);
         assert_ne!(
@@ -629,7 +675,7 @@ mod tests {
             from: root.path().join("vanished.txt"),
             to: destination.clone(),
         };
-        reserve(&destination).unwrap();
+        reserve(&destination, Collision::Suffix).unwrap().unwrap();
         assert!(destination.exists());
 
         discard_reservation(&operation);
@@ -653,5 +699,81 @@ mod tests {
         discard_reservation(&operation);
 
         assert_eq!(fs::read_to_string(&destination).unwrap(), "a real result");
+    }
+
+    #[test]
+    fn the_skip_policy_leaves_the_existing_file_and_does_not_move_the_source() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+
+        let outcomes = executor()
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: occupied.clone(),
+                }],
+                Collision::Skip,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes, [Outcome::Skipped(SkipReason::DestinationTaken)]);
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
+        assert!(source.exists(), "the source must stay put when skipping");
+    }
+
+    #[test]
+    fn the_skip_policy_still_moves_when_the_destination_is_free() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let destination = root.path().join("archive/notes.txt");
+        write(&source, "content");
+
+        let outcomes = executor()
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: destination.clone(),
+                }],
+                Collision::Skip,
+            )
+            .unwrap();
+
+        assert!(matches!(outcomes[0], Outcome::Applied(_)));
+        assert!(destination.exists() && !source.exists());
+    }
+
+    #[test]
+    fn a_skipped_operation_is_not_offered_for_undo() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+        let executor = executor();
+
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source,
+                    to: occupied,
+                }],
+                Collision::Skip,
+            )
+            .unwrap();
+
+        assert!(
+            executor
+                .journal()
+                .applied_in_batch("batch-1")
+                .unwrap()
+                .is_empty(),
+            "a skipped operation never happened, so there is nothing to revert"
+        );
     }
 }

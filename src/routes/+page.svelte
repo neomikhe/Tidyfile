@@ -223,6 +223,19 @@
         System folders, drive roots and your whole home folder cannot be watched.
       </p>
 
+      <h3>When a file with that name already exists</h3>
+      <label class="field">
+        <select
+          value={workspace.onCollision}
+          onchange={(event) =>
+            workspace.setCollision(event.currentTarget.value as "suffix" | "skip")}
+        >
+          <option value="suffix">Keep both, adding a number</option>
+          <option value="skip">Leave the file where it is</option>
+        </select>
+      </label>
+      <p class="note">Either way, the file already at the destination is never replaced.</p>
+
       <h3>Watch continuously</h3>
       <label class="switch">
         <input
@@ -404,6 +417,16 @@
 
   .unfinished button {
     align-self: flex-start;
+  }
+
+  .field select {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid;
+    border-radius: 0.25rem;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 0.9rem;
   }
 
   .switch {

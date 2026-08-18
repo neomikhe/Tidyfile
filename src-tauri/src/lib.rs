@@ -4,6 +4,7 @@ pub mod journal;
 pub mod paths;
 pub mod rules;
 pub mod service;
+pub mod settings;
 pub mod store;
 pub mod templates;
 pub mod watch;
@@ -29,6 +30,8 @@ pub fn run() -> tauri::Result<()> {
             ipc::load_rules,
             ipc::save_rules,
             ipc::activity,
+            ipc::load_settings,
+            ipc::save_settings,
             ipc::start_watching,
             ipc::stop_watching,
             ipc::watched_folder

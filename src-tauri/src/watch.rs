@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
+use crate::ipc::current_collision;
 use crate::paths;
 use crate::rules::Rule;
 use crate::service::{BatchReport, ServiceError, Tidyfile};
@@ -40,6 +41,7 @@ pub fn start(
     app: AppHandle,
     service: Arc<Mutex<Tidyfile>>,
     rules_file: PathBuf,
+    settings_file: PathBuf,
     folder: &Path,
 ) -> Result<WatchSession, ServiceError> {
     let root = paths::accept_watched_folder(folder)?;
@@ -51,7 +53,7 @@ pub fn start(
     let worker = std::thread::spawn(move || {
         while !flag.load(Ordering::Relaxed) {
             if let Some(file) = watcher.next_settled(POLL_INTERVAL) {
-                tidy_one(&app, &service, &rules_file, &watched, &file);
+                tidy_one(&app, &service, &rules_file, &settings_file, &watched, &file);
             }
         }
         watcher.stop();
@@ -68,10 +70,11 @@ fn tidy_one(
     app: &AppHandle,
     service: &Mutex<Tidyfile>,
     rules_file: &Path,
+    settings_file: &Path,
     root: &Path,
     file: &Path,
 ) {
-    let Ok(rules) = store::load(rules_file) else {
+    let Ok(rules) = store::load::<Vec<Rule>>(rules_file) else {
         return;
     };
     let enabled: Vec<Rule> = rules.into_iter().filter(|rule| rule.enabled).collect();
@@ -81,7 +84,8 @@ fn tidy_one(
     let Ok(tidyfile) = service.lock() else {
         return;
     };
-    if let Ok(report) = tidyfile.organize_file(&enabled, root, file) {
+    let collision = current_collision(settings_file);
+    if let Ok(report) = tidyfile.organize_file(&enabled, root, file, collision) {
         announce(app, report);
     }
 }

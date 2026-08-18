@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use crate::executor::Collision;
 use crate::paths::PathError;
 use crate::rules::Rule;
 use crate::service::{ActivityEntry, BatchReport, PlannedChange, ServiceError, Tidyfile};
+use crate::settings::Settings;
 use crate::store::{self, StoreError};
 use crate::watch::{self, WatchSession};
 
@@ -61,6 +63,7 @@ fn code_for(error: &ServiceError) -> &'static str {
 pub struct AppState {
     service: Arc<Mutex<Tidyfile>>,
     rules_file: PathBuf,
+    settings_file: PathBuf,
     session: Mutex<Option<WatchSession>>,
 }
 
@@ -69,6 +72,7 @@ impl AppState {
         Ok(Self {
             service: Arc::new(Mutex::new(Tidyfile::open(&folder.join("journal.sqlite"))?)),
             rules_file: folder.join("rules.json"),
+            settings_file: folder.join("settings.json"),
             session: Mutex::new(None),
         })
     }
@@ -84,6 +88,7 @@ pub fn start_watching(
         app,
         state.service.clone(),
         state.rules_file.clone(),
+        state.settings_file.clone(),
         Path::new(&folder),
     )?;
     let mut slot = state.session.lock().map_err(|_| IpcError::unavailable())?;
@@ -133,9 +138,10 @@ pub async fn organize(
     folder: String,
 ) -> Result<BatchReport, IpcError> {
     let service = state.service.clone();
+    let collision = current_collision(&state.settings_file);
     off_thread(move || {
         with(&service, |tidyfile| {
-            tidyfile.organize(&rules, &into_path(folder))
+            tidyfile.organize(&rules, &into_path(folder), collision)
         })
     })
     .await
@@ -181,6 +187,24 @@ pub async fn activity(
     let service = state.service.clone();
     let capped = limit.clamp(1, MAX_ACTIVITY);
     off_thread(move || with(&service, |tidyfile| tidyfile.activity(capped))).await
+}
+
+pub fn current_collision(settings_file: &Path) -> Collision {
+    store::load::<Settings>(settings_file)
+        .map(|settings| settings.on_collision)
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn load_settings(state: State<'_, AppState>) -> Result<Settings, IpcError> {
+    let path = state.settings_file.clone();
+    off_thread(move || store::load::<Settings>(&path).map_err(IpcError::from)).await
+}
+
+#[tauri::command]
+pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), IpcError> {
+    let path = state.settings_file.clone();
+    off_thread(move || store::save(&path, &settings).map_err(IpcError::from)).await
 }
 
 fn into_path(folder: String) -> PathBuf {

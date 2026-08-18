@@ -119,3 +119,19 @@ export function watchedFolder(): Promise<string | null> {
 export function settleInterrupted(): Promise<number> {
   return invoke<number>("settle_interrupted");
 }
+
+export type Collision = "suffix" | "skip";
+
+export interface Settings {
+  folder: string | null;
+  watching: boolean;
+  onCollision: Collision;
+}
+
+export function loadSettings(): Promise<Settings> {
+  return invoke<Settings>("load_settings");
+}
+
+export function saveSettings(settings: Settings): Promise<void> {
+  return invoke<void>("save_settings", { settings });
+}

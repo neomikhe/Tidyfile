@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::rules::Rule;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -11,20 +12,20 @@ pub enum StoreError {
     Malformed(#[from] serde_json::Error),
 }
 
-pub fn load(path: &Path) -> Result<Vec<Rule>, StoreError> {
+pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StoreError> {
     match fs::read_to_string(path) {
         Ok(contents) => Ok(serde_json::from_str(&contents)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(error) => Err(StoreError::Unreachable(error)),
     }
 }
 
-pub fn save(path: &Path, rules: &[Rule]) -> Result<(), StoreError> {
+pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let staging = staging_path(path);
-    fs::write(&staging, serde_json::to_string_pretty(rules)?)?;
+    fs::write(&staging, serde_json::to_string_pretty(value)?)?;
     fs::rename(&staging, path)?;
     Ok(())
 }
@@ -39,7 +40,7 @@ fn staging_path(path: &Path) -> PathBuf {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::rules::{Action, Combinator, Condition};
+    use crate::rules::{Action, Combinator, Condition, Rule};
     use tempfile::TempDir;
 
     fn sample() -> Rule {
@@ -66,14 +67,14 @@ mod tests {
 
         save(&path, &[sample()]).unwrap();
 
-        assert_eq!(load(&path).unwrap(), [sample()]);
+        assert_eq!(load::<Vec<Rule>>(&path).unwrap(), [sample()]);
     }
 
     #[test]
     fn a_missing_file_reads_as_no_rules() {
         let folder = TempDir::new().unwrap();
 
-        let rules = load(&folder.path().join("absent.json")).unwrap();
+        let rules: Vec<Rule> = load(&folder.path().join("absent.json")).unwrap();
 
         assert!(rules.is_empty());
     }
@@ -94,7 +95,10 @@ mod tests {
         let path = folder.path().join("rules.json");
         fs::write(&path, "{ not json").unwrap();
 
-        assert!(matches!(load(&path), Err(StoreError::Malformed(_))));
+        assert!(matches!(
+            load::<Vec<Rule>>(&path),
+            Err(StoreError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -116,7 +120,7 @@ mod tests {
         let blocked = save(folder.path(), &[sample()]);
 
         assert!(blocked.is_err());
-        assert_eq!(load(&path).unwrap(), [sample()]);
+        assert_eq!(load::<Vec<Rule>>(&path).unwrap(), [sample()]);
     }
 
     #[test]
@@ -124,8 +128,8 @@ mod tests {
         let folder = TempDir::new().unwrap();
         let path = folder.path().join("rules.json");
 
-        save(&path, &[]).unwrap();
+        save(&path, &Vec::<Rule>::new()).unwrap();
 
-        assert!(load(&path).unwrap().is_empty());
+        assert!(load::<Vec<Rule>>(&path).unwrap().is_empty());
     }
 }

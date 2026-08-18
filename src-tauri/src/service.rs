@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::executor::{Executor, Outcome};
+use crate::executor::{Collision, Executor, Outcome};
 use crate::journal::{Journal, JournalError, Operation};
 use crate::paths::{self, PathError};
 use crate::rules::{EvaluationError, PlanContext, Rule, plan};
@@ -85,10 +85,15 @@ impl Tidyfile {
             .collect())
     }
 
-    pub fn organize(&self, rules: &[Rule], folder: &Path) -> Result<BatchReport, ServiceError> {
+    pub fn organize(
+        &self,
+        rules: &[Rule],
+        folder: &Path,
+        on_collision: Collision,
+    ) -> Result<BatchReport, ServiceError> {
         let operations = self.plan_folder(rules, folder)?;
         let batch = next_batch_id();
-        let outcomes = self.executor.apply(&batch, &operations)?;
+        let outcomes = self.executor.apply(&batch, &operations, on_collision)?;
         Ok(summarize(batch, &outcomes))
     }
 
@@ -119,6 +124,7 @@ impl Tidyfile {
         rules: &[Rule],
         root: &Path,
         file: &Path,
+        on_collision: Collision,
     ) -> Result<BatchReport, ServiceError> {
         if !paths::is_within(root, file) {
             return Ok(nothing_happened());
@@ -135,7 +141,7 @@ impl Tidyfile {
             return Ok(nothing_happened());
         }
         let batch = next_batch_id();
-        let outcomes = self.executor.apply(&batch, &operations)?;
+        let outcomes = self.executor.apply(&batch, &operations, on_collision)?;
         Ok(summarize(batch, &outcomes))
     }
 
@@ -310,7 +316,9 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let planned = service.simulate(&rules, root.path()).unwrap();
-        let report = service.organize(&rules, root.path()).unwrap();
+        let report = service
+            .organize(&rules, root.path(), Collision::Suffix)
+            .unwrap();
 
         assert_eq!(report.applied, planned.len());
         assert_eq!(report.failed, 0);
@@ -327,7 +335,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let report = service
-            .organize(&[pdf_rule(out.path())], root.path())
+            .organize(&[pdf_rule(out.path())], root.path(), Collision::Suffix)
             .unwrap();
         service.undo(&report.batch).unwrap();
 
@@ -406,7 +414,7 @@ mod tests {
         let service = Tidyfile::in_memory().unwrap();
 
         let report = service
-            .organize(&[pdf_rule(out.path())], root.path())
+            .organize(&[pdf_rule(out.path())], root.path(), Collision::Suffix)
             .unwrap();
 
         assert_eq!((report.applied, report.skipped, report.failed), (0, 0, 0));

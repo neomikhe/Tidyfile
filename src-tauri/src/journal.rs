@@ -68,6 +68,7 @@ pub enum State {
     Done,
     Failed,
     Undone,
+    Skipped,
 }
 
 impl State {
@@ -77,6 +78,7 @@ impl State {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Undone => "undone",
+            Self::Skipped => "skipped",
         }
     }
 }
