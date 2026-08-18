@@ -143,6 +143,14 @@ impl Journal {
         collect(rows)
     }
 
+    pub fn retarget(&self, id: i64, destination: &Path) -> Result<(), JournalError> {
+        self.connection.execute(
+            "UPDATE operations SET destination = ?1 WHERE id = ?2",
+            params![path_to_text(destination)?, id],
+        )?;
+        Ok(())
+    }
+
     pub fn settle_interrupted(&self, detail: &str) -> Result<usize, JournalError> {
         let changed = self.connection.execute(
             "UPDATE operations SET state = ?1, detail = ?2 WHERE state = ?3",

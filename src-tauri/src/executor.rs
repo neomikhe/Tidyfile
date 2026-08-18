@@ -66,12 +66,15 @@ impl Executor {
         if !operation.source().exists() {
             return Ok(Outcome::Skipped(SkipReason::SourceVanished));
         }
-        let resolved = match without_collision(operation) {
-            Ok(resolved) => resolved,
-            Err(error) => return Ok(Outcome::Failed(error.to_string())),
+        let id = self.journal.record_planned(batch, operation)?;
+        let claimed = match claim(operation) {
+            Ok(claimed) => claimed,
+            Err(error) => return self.give_up(id, &error.to_string()),
         };
-        let id = self.journal.record_planned(batch, &resolved)?;
-        self.run_and_record(id, resolved)
+        if let Some(destination) = destination_of(&claimed) {
+            self.journal.retarget(id, destination)?;
+        }
+        self.run_and_record(id, claimed)
     }
 
     fn run_and_record(&self, id: i64, operation: Operation) -> Result<Outcome, ExecutorError> {
@@ -81,11 +84,15 @@ impl Executor {
                 Ok(Outcome::Applied(operation))
             }
             Err(error) => {
-                let detail = error.to_string();
-                self.journal.mark(id, State::Failed, Some(&detail))?;
-                Ok(Outcome::Failed(detail))
+                discard_reservation(&operation);
+                self.give_up(id, &error.to_string())
             }
         }
+    }
+
+    fn give_up(&self, id: i64, detail: &str) -> Result<Outcome, ExecutorError> {
+        self.journal.mark(id, State::Failed, Some(detail))?;
+        Ok(Outcome::Failed(detail.to_owned()))
     }
 
     pub fn undo_batch(&self, batch: &str) -> Result<Vec<Outcome>, ExecutorError> {
@@ -139,9 +146,6 @@ fn move_file(from: &Path, to: &Path) -> Result<(), ActionError> {
 }
 
 fn copy_file(from: &Path, to: &Path) -> Result<(), ActionError> {
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let original = fs::metadata(from)?.len();
     let copied = fs::copy(from, to)?;
     if copied != original {
@@ -151,15 +155,50 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), ActionError> {
     Ok(())
 }
 
-fn without_collision(operation: &Operation) -> Result<Operation, ActionError> {
-    let Some(destination) = destination_of(operation) else {
+fn claim(operation: &Operation) -> Result<Operation, ActionError> {
+    let Some(desired) = destination_of(operation) else {
         return Ok(operation.clone());
     };
-    if !destination.exists() {
-        return Ok(operation.clone());
+    Ok(retarget(operation, reserve(desired)?))
+}
+
+fn reserve(desired: &Path) -> Result<PathBuf, ActionError> {
+    if let Some(parent) = desired.parent() {
+        fs::create_dir_all(parent)?;
     }
-    let free = free_name(destination).ok_or(ActionError::NoFreeName)?;
-    Ok(retarget(operation, free))
+    for candidate in candidates(desired) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(ActionError::Move(error)),
+        }
+    }
+    Err(ActionError::NoFreeName)
+}
+
+fn candidates(desired: &Path) -> Vec<PathBuf> {
+    let mut names = vec![desired.to_path_buf()];
+    let (Some(parent), Some(stem)) = (desired.parent(), desired.file_stem()) else {
+        return names;
+    };
+    names.extend(
+        (2..MAX_NAME_ATTEMPTS)
+            .map(|attempt| parent.join(candidate_name(stem, desired.extension(), attempt))),
+    );
+    names
+}
+
+fn discard_reservation(operation: &Operation) {
+    let Some(destination) = destination_of(operation) else {
+        return;
+    };
+    if fs::metadata(destination).is_ok_and(|data| data.len() == 0) {
+        let _ = trash::delete(destination);
+    }
 }
 
 fn destination_of(operation: &Operation) -> Option<&Path> {
@@ -181,14 +220,6 @@ fn retarget(operation: &Operation, to: PathBuf) -> Operation {
         },
         Operation::Trash { from } => Operation::Trash { from: from.clone() },
     }
-}
-
-fn free_name(desired: &Path) -> Option<PathBuf> {
-    let parent = desired.parent()?;
-    let stem = desired.file_stem()?;
-    (2..MAX_NAME_ATTEMPTS)
-        .map(|attempt| parent.join(candidate_name(stem, desired.extension(), attempt)))
-        .find(|candidate| !candidate.exists())
 }
 
 fn candidate_name(
@@ -522,5 +553,105 @@ mod tests {
             panic!("expected an applied copy, got {:?}", outcomes[0]);
         };
         assert_eq!(to.file_name().unwrap(), "notes (2).txt");
+    }
+
+    #[test]
+    fn the_filesystem_primitives_would_overwrite_if_we_let_them() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("a.txt");
+        let occupied = root.path().join("b.txt");
+
+        write(&source, "NEW");
+        write(&occupied, "EXISTING");
+        fs::rename(&source, &occupied).unwrap();
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "NEW",
+            "fs::rename replaces an existing file, so reserve() must claim the name first"
+        );
+
+        write(&source, "NEW2");
+        write(&occupied, "EXISTING2");
+        fs::copy(&source, &occupied).unwrap();
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "NEW2",
+            "fs::copy replaces an existing file too"
+        );
+
+        let refused = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&occupied);
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "create_new is the only one of the three that refuses, which is why reserve uses it"
+        );
+    }
+
+    #[test]
+    fn reserving_never_hands_back_an_occupied_name() {
+        let root = TempDir::new().unwrap();
+        let occupied = root.path().join("notes.txt");
+        write(&occupied, "existing");
+
+        let claimed = reserve(&occupied).unwrap();
+
+        assert_ne!(claimed, occupied);
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
+        assert!(
+            claimed.exists(),
+            "a reservation is a real file held on disk"
+        );
+    }
+
+    #[test]
+    fn a_second_claim_cannot_reuse_a_name_the_first_is_holding() {
+        let root = TempDir::new().unwrap();
+        let desired = root.path().join("report.pdf");
+
+        let first = reserve(&desired).unwrap();
+        let second = reserve(&desired).unwrap();
+
+        assert_eq!(first, desired);
+        assert_ne!(
+            second, first,
+            "the claim is atomic, so the second caller gets a different name"
+        );
+    }
+
+    #[test]
+    fn a_failed_operation_leaves_no_empty_reservation_behind() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("out/ghost.txt");
+        let operation = Operation::Move {
+            from: root.path().join("vanished.txt"),
+            to: destination.clone(),
+        };
+        reserve(&destination).unwrap();
+        assert!(destination.exists());
+
+        discard_reservation(&operation);
+
+        assert!(
+            !destination.exists(),
+            "the empty placeholder was not cleaned up"
+        );
+    }
+
+    #[test]
+    fn a_reservation_holding_real_content_is_never_discarded() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("result.txt");
+        write(&destination, "a real result");
+        let operation = Operation::Move {
+            from: root.path().join("source.txt"),
+            to: destination.clone(),
+        };
+
+        discard_reservation(&operation);
+
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "a real result");
     }
 }
