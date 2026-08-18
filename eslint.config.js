@@ -24,6 +24,7 @@ export default ts.config(
     ignores: [
       "build/",
       ".svelte-kit/",
+      "vitest.config.ts",
       "src-tauri/",
       "node_modules/",
       "static/",
