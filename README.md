@@ -26,6 +26,18 @@ Tidyfile aims to be the option that is free, open source, cross-platform *and* g
 
 Tauri 2 · Rust · Svelte · TypeScript · SQLite
 
+## Building from source
+
+Requires [Rust](https://rustup.rs) 1.85+ and [Node.js](https://nodejs.org) 22+, plus the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
+
+```bash
+npm install
+npm run tauri dev      # run in development
+npm run tauri build    # produce installers
+```
+
 ## License
 
-Not yet decided (GPL-3.0 vs MIT). This will be settled and documented before the repository accepts contributions.
+[GNU General Public License v3.0](LICENSE).
+
+Tidyfile exists because the good tools in this category are paid and closed. The GPL keeps it that way round: anyone may use, study, modify and share it, but a distributed derivative has to ship its source under the same terms. Nobody gets to close it and sell it back to you.

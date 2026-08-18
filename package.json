@@ -1,0 +1,35 @@
+{
+  "name": "tidyfile",
+  "version": "0.1.0",
+  "description": "Rule-based file organizer for Windows, macOS and Linux",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "lint": "eslint .",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "@types/node": "^26.2.0",
+    "eslint": "^9.17.0",
+    "eslint-plugin-svelte": "^2.46.0",
+    "globals": "^15.14.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "typescript-eslint": "^8.18.0",
+    "vite": "^6.0.3"
+  }
+}
