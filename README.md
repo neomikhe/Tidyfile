@@ -6,25 +6,43 @@ Define visual rules — *"if it's a PDF and the name contains 'invoice', move it
 
 Everything runs locally. No cloud, no telemetry, no subscription.
 
-> **Status: early development.** The project is in its setup phase and is not usable yet. There are no releases available.
+> **Status: pre-release.** The app works end to end — rules, preview, tidying, undo and live watching — but it has not been through a beta yet and there are no published releases. Build it from source if you want to try it.
 
 ## Why
 
-Existing tools each miss something: Hazel is paid and macOS-only, File Juggler is paid and Windows-only, DropIt has had no releases since 2018, and `organize` and `hazelnut` are terminal tools aimed at technical users.
+Every existing tool misses something:
 
-Tidyfile aims to be the option that is free, open source, cross-platform *and* graphical at the same time — including a real GUI on Linux.
+| | Price | Cross-platform | GUI | Open source | Maintained |
+|---|---|---|---|---|---|
+| Hazel | $42 | macOS only | Yes | No | Yes |
+| File Juggler | ~$40 | Windows only | Yes | No | Yes |
+| File Arbor | Freemium | Win / macOS | Yes | No | Yes |
+| DropIt | Free | Windows only | Yes | Yes | No releases since 2018 |
+| organize | Free | Yes | No — CLI + YAML | Yes | Yes |
+| hazelnut | Free | Yes | No — terminal UI | Yes | Yes |
+| **Tidyfile** | **Free** | **Win / macOS / Linux** | **Yes** | **Yes** | **Yes** |
 
-## Planned features
+Nothing else ticks every box, and nothing else offers a real graphical interface on Linux.
 
-- **Visual rule editor** — combinable conditions (AND/OR) and actions, no YAML or regex required.
-- **Real-time folder watching**, plus manual and scheduled runs.
-- **Simulation first** — every new rule shows exactly which files it would affect before it does anything.
-- **Undo history** — every action is journaled; one click reverts it.
-- **Safe by design** — files go to the trash, never deleted directly.
+## Your files are the product
 
-## Stack
+A file organizer that loses someone's files is worthless, so safety is not a feature here — it is the design.
 
-Tauri 2 · Rust · Svelte · TypeScript · SQLite
+- **Nothing is ever deleted.** Removals go to the system trash. There is no direct delete anywhere in the codebase, and the test suite enforces it.
+- **Preview before anything moves.** Every rule shows exactly which files it would touch, and what would happen to each. The preview and the real run share the same code, so they cannot disagree.
+- **Everything is undoable.** Each operation is written to a SQLite journal *before* the disk is touched, then marked done. One click reverts a batch — including batches applied automatically while watching.
+- **Nothing is overwritten.** A name collision gets a numbered suffix. Existing files are never replaced.
+- **Interruptions are survivable.** If the app is killed mid-run, the journal records what was left unconfirmed.
+
+## Features
+
+- **Visual rule editor** — combinable conditions (all/any) and actions. No YAML, no mandatory regex.
+- **Conditions** — extension, name contains, glob, regex, size, age, subfolder.
+- **Actions** — move, copy, rename with templates, send to trash, and automatic subfolders by date or type.
+- **Live watching** — new files are tidied as they arrive, with debouncing so partial downloads are left alone.
+- **History** — every batch listed, every batch undoable.
+
+Rename and subfolder templates accept `{name}`, `{ext}`, `{date}`, `{year}`, `{month}`, `{day}` and `{counter}`.
 
 ## Building from source
 
@@ -35,6 +53,12 @@ npm install
 npm run tauri dev      # run in development
 npm run tauri build    # produce installers
 ```
+
+## Unsigned builds
+
+Releases are not code-signed: an Apple certificate costs $99/year and a Windows one costs more, which is not sustainable for a free project right now.
+
+This means macOS and Windows will warn you the first time you open the app. Published SHA-256 checksums let you verify a download matches what CI built. Signing may come later if the project warrants it.
 
 ## License
 

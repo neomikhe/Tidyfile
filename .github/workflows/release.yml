@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: Linux
+            args: ""
+          - os: macos-latest
+            label: macOS
+            args: "--target universal-apple-darwin"
+          - os: windows-latest
+            label: Windows
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev \
+            build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Tidyfile ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+  checksums:
+    name: Checksums
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir installers
+          cd installers
+          gh release download "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY"
+          sha256sum -- * > ../SHA256SUMS.txt
+          cd ..
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"
