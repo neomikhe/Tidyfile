@@ -206,6 +206,7 @@ pub struct BatchSummary {
     pub done: usize,
     pub undone: usize,
     pub failed: usize,
+    pub skipped: usize,
     pub recorded_at: i64,
 }
 
@@ -216,6 +217,7 @@ impl Journal {
                     SUM(state = 'done'),
                     SUM(state = 'undone'),
                     SUM(state = 'failed'),
+                    SUM(state = 'skipped'),
                     MAX(recorded_at)
              FROM operations
              WHERE batch NOT LIKE '%:undo'
@@ -230,7 +232,8 @@ impl Journal {
                 done: row.get::<_, i64>(1)?.max(0) as usize,
                 undone: row.get::<_, i64>(2)?.max(0) as usize,
                 failed: row.get::<_, i64>(3)?.max(0) as usize,
-                recorded_at: row.get(4)?,
+                skipped: row.get::<_, i64>(4)?.max(0) as usize,
+                recorded_at: row.get(5)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -534,5 +537,23 @@ mod tests {
         let journal = Journal::open_in_memory().unwrap();
 
         assert_eq!(journal.settle_interrupted("interrupted run").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_skipped_operation_is_reported_in_the_history() {
+        let journal = Journal::open_in_memory().unwrap();
+        let id = journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        journal
+            .mark(id, State::Skipped, Some("destination already exists"))
+            .unwrap();
+
+        let summaries = journal.recent_batches(10).unwrap();
+
+        assert_eq!(
+            summaries[0].skipped, 1,
+            "a batch that skipped everything must not look like it did nothing"
+        );
     }
 }

@@ -89,6 +89,7 @@ export interface ActivityEntry {
   done: number;
   undone: number;
   failed: number;
+  skipped: number;
   recordedAt: number;
 }
 

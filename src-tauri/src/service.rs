@@ -44,6 +44,7 @@ pub struct ActivityEntry {
     pub done: usize,
     pub undone: usize,
     pub failed: usize,
+    pub skipped: usize,
     pub recorded_at: i64,
 }
 
@@ -171,6 +172,7 @@ impl Tidyfile {
                 done: summary.done,
                 undone: summary.undone,
                 failed: summary.failed,
+                skipped: summary.skipped,
                 recorded_at: summary.recorded_at,
             })
             .collect())

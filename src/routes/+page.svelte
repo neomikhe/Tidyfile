@@ -200,6 +200,7 @@
                 <span class="when">{moment(entry.recordedAt)}</span>
                 <span class="counts">
                   {entry.done} applied
+                  {#if entry.skipped > 0}, {entry.skipped} left alone{/if}
                   {#if entry.failed > 0}, {entry.failed} failed{/if}
                   {#if entry.undone > 0}, {entry.undone} undone{/if}
                 </span>
