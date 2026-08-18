@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod journal;
+pub mod rules;
 pub mod watcher;
 
 pub fn run() -> tauri::Result<()> {

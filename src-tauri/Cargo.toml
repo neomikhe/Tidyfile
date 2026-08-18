@@ -23,6 +23,8 @@ notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 trash = "5.2.6"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+regex = "1.13.1"
+globset = "0.4.19"
 
 [lints.rust]
 unsafe_code = "deny"
