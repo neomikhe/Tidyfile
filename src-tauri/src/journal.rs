@@ -153,6 +153,44 @@ impl Journal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchSummary {
+    pub batch: String,
+    pub done: usize,
+    pub undone: usize,
+    pub failed: usize,
+    pub recorded_at: i64,
+}
+
+impl Journal {
+    pub fn recent_batches(&self, limit: usize) -> Result<Vec<BatchSummary>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "SELECT batch,
+                    SUM(state = 'done'),
+                    SUM(state = 'undone'),
+                    SUM(state = 'failed'),
+                    MAX(recorded_at)
+             FROM operations
+             WHERE batch NOT LIKE '%:undo'
+             GROUP BY batch
+             ORDER BY MAX(recorded_at) DESC, batch DESC
+             LIMIT ?1",
+        )?;
+        let capped = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map([capped], |row| {
+            Ok(BatchSummary {
+                batch: row.get(0)?,
+                done: row.get::<_, i64>(1)?.max(0) as usize,
+                undone: row.get::<_, i64>(2)?.max(0) as usize,
+                failed: row.get::<_, i64>(3)?.max(0) as usize,
+                recorded_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(JournalError::from)
+    }
+}
+
 type Row = (i64, String, String, String, Option<String>);
 
 fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
@@ -348,5 +386,65 @@ mod tests {
         reopened.mark(id, State::Done, None).unwrap();
 
         assert_eq!(reopened.applied_in_batch("batch-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recent_batches_summarises_each_batch_by_state() {
+        let journal = Journal::open_in_memory().unwrap();
+        let done = journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        let failed = journal
+            .record_planned("batch-1", &move_operation("c", "d"))
+            .unwrap();
+        journal.mark(done, State::Done, None).unwrap();
+        journal.mark(failed, State::Failed, Some("denied")).unwrap();
+
+        let summaries = journal.recent_batches(10).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!((summaries[0].done, summaries[0].failed), (1, 1));
+    }
+
+    #[test]
+    fn undo_batches_are_kept_out_of_the_activity_list() {
+        let journal = Journal::open_in_memory().unwrap();
+        journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        journal
+            .record_planned("batch-1:undo", &move_operation("b", "a"))
+            .unwrap();
+
+        let summaries = journal.recent_batches(10).unwrap();
+
+        let names: Vec<_> = summaries.iter().map(|entry| entry.batch.clone()).collect();
+        assert_eq!(names, ["batch-1"]);
+    }
+
+    #[test]
+    fn the_activity_limit_is_honoured() {
+        let journal = Journal::open_in_memory().unwrap();
+        for index in 0..5 {
+            journal
+                .record_planned(&format!("batch-{index}"), &move_operation("a", "b"))
+                .unwrap();
+        }
+
+        assert_eq!(journal.recent_batches(2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_undone_batch_reports_its_undone_count() {
+        let journal = Journal::open_in_memory().unwrap();
+        let id = journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        journal.mark(id, State::Done, None).unwrap();
+        journal.mark(id, State::Undone, None).unwrap();
+
+        let summaries = journal.recent_batches(10).unwrap();
+
+        assert_eq!((summaries[0].done, summaries[0].undone), (0, 1));
     }
 }

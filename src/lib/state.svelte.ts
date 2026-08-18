@@ -1,0 +1,101 @@
+import {
+  activity,
+  isIpcError,
+  loadRules,
+  organize,
+  saveRules,
+  simulate,
+  undo,
+  type ActivityEntry,
+  type PlannedChange,
+  type Rule,
+} from "./ipc";
+
+export type Status = { kind: "idle" } | { kind: "working" } | { kind: "problem"; message: string };
+
+function describe(error: unknown): string {
+  if (isIpcError(error)) {
+    return error.message;
+  }
+  return "Something went wrong. Please try again.";
+}
+
+export class Workspace {
+  rules = $state<Rule[]>([]);
+  folder = $state<string | null>(null);
+  preview = $state<PlannedChange[] | null>(null);
+  history = $state<ActivityEntry[]>([]);
+  status = $state<Status>({ kind: "idle" });
+
+  get enabledRules(): Rule[] {
+    return this.rules.filter((rule) => rule.enabled);
+  }
+
+  get canRun(): boolean {
+    return this.folder !== null && this.enabledRules.length > 0 && this.status.kind !== "working";
+  }
+
+  async initialise(): Promise<void> {
+    await this.attempt(async () => {
+      this.rules = await loadRules();
+      this.history = await activity();
+    });
+  }
+
+  async toggle(id: string): Promise<void> {
+    this.rules = this.rules.map((rule) =>
+      rule.id === id ? { ...rule, enabled: !rule.enabled } : rule,
+    );
+    this.preview = null;
+    await this.attempt(() => saveRules(this.rules));
+  }
+
+  async chooseFolder(picked: string): Promise<void> {
+    this.folder = picked;
+    this.preview = null;
+    await this.refreshPreview();
+  }
+
+  async refreshPreview(): Promise<void> {
+    if (this.folder === null) {
+      return;
+    }
+    const folder = this.folder;
+    await this.attempt(async () => {
+      this.preview = await simulate(this.enabledRules, folder);
+    });
+  }
+
+  async run(): Promise<void> {
+    if (this.folder === null) {
+      return;
+    }
+    const folder = this.folder;
+    await this.attempt(async () => {
+      await organize(this.enabledRules, folder);
+      this.history = await activity();
+      this.preview = await simulate(this.enabledRules, folder);
+    });
+  }
+
+  async revert(batch: string): Promise<void> {
+    await this.attempt(async () => {
+      await undo(batch);
+      this.history = await activity();
+      if (this.folder !== null) {
+        this.preview = await simulate(this.enabledRules, this.folder);
+      }
+    });
+  }
+
+  private async attempt(work: () => Promise<void>): Promise<void> {
+    this.status = { kind: "working" };
+    try {
+      await work();
+      this.status = { kind: "idle" };
+    } catch (error) {
+      this.preview = null;
+      this.status = { kind: "problem", message: describe(error) };
+    }
+  }
+}

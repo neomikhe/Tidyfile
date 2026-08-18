@@ -50,6 +50,8 @@ export type ErrorCode =
   | "invalidRule"
   | "historyUnavailable"
   | "executionFailed"
+  | "rulesUnreachable"
+  | "rulesMalformed"
   | "unavailable";
 
 export interface IpcError {
@@ -79,4 +81,24 @@ export function undo(batch: string): Promise<BatchReport> {
 
 export function interrupted(): Promise<PlannedChange[]> {
   return invoke<PlannedChange[]>("interrupted");
+}
+
+export interface ActivityEntry {
+  batch: string;
+  done: number;
+  undone: number;
+  failed: number;
+  recordedAt: number;
+}
+
+export function loadRules(): Promise<Rule[]> {
+  return invoke<Rule[]>("load_rules");
+}
+
+export function saveRules(rules: Rule[]): Promise<void> {
+  return invoke<void>("save_rules", { rules });
+}
+
+export function activity(limit = 50): Promise<ActivityEntry[]> {
+  return invoke<ActivityEntry[]>("activity", { limit });
 }

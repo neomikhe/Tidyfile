@@ -26,6 +26,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 regex = "1.13.1"
 globset = "0.4.19"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+tauri-plugin-dialog = "2.7.2"
 
 [lints.rust]
 unsafe_code = "deny"

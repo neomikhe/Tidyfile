@@ -6,7 +6,8 @@ use tauri::State;
 
 use crate::paths::PathError;
 use crate::rules::Rule;
-use crate::service::{BatchReport, PlannedChange, ServiceError, Tidyfile};
+use crate::service::{ActivityEntry, BatchReport, PlannedChange, ServiceError, Tidyfile};
+use crate::store::{self, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +26,16 @@ impl IpcError {
 
     fn unavailable() -> Self {
         Self::new("unavailable", "Tidyfile is busy. Try again in a moment.")
+    }
+}
+
+impl From<StoreError> for IpcError {
+    fn from(error: StoreError) -> Self {
+        let code = match error {
+            StoreError::Unreachable(_) => "rulesUnreachable",
+            StoreError::Malformed(_) => "rulesMalformed",
+        };
+        Self::new(code, &error.to_string())
     }
 }
 
@@ -47,12 +58,14 @@ fn code_for(error: &ServiceError) -> &'static str {
 
 pub struct AppState {
     service: Arc<Mutex<Tidyfile>>,
+    rules_file: PathBuf,
 }
 
 impl AppState {
-    pub fn open(journal: &Path) -> Result<Self, ServiceError> {
+    pub fn open(folder: &Path) -> Result<Self, ServiceError> {
         Ok(Self {
-            service: Arc::new(Mutex::new(Tidyfile::open(journal)?)),
+            service: Arc::new(Mutex::new(Tidyfile::open(&folder.join("journal.sqlite"))?)),
+            rules_file: folder.join("rules.json"),
         })
     }
 }
@@ -97,6 +110,30 @@ pub async fn undo(state: State<'_, AppState>, batch: String) -> Result<BatchRepo
 pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange>, IpcError> {
     let service = state.service.clone();
     off_thread(move || with(&service, Tidyfile::interrupted)).await
+}
+
+const MAX_ACTIVITY: usize = 500;
+
+#[tauri::command]
+pub async fn load_rules(state: State<'_, AppState>) -> Result<Vec<Rule>, IpcError> {
+    let path = state.rules_file.clone();
+    off_thread(move || store::load(&path).map_err(IpcError::from)).await
+}
+
+#[tauri::command]
+pub async fn save_rules(state: State<'_, AppState>, rules: Vec<Rule>) -> Result<(), IpcError> {
+    let path = state.rules_file.clone();
+    off_thread(move || store::save(&path, &rules).map_err(IpcError::from)).await
+}
+
+#[tauri::command]
+pub async fn activity(
+    state: State<'_, AppState>,
+    limit: usize,
+) -> Result<Vec<ActivityEntry>, IpcError> {
+    let service = state.service.clone();
+    let capped = limit.clamp(1, MAX_ACTIVITY);
+    off_thread(move || with(&service, |tidyfile| tidyfile.activity(capped))).await
 }
 
 fn into_path(folder: String) -> PathBuf {

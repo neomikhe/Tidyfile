@@ -37,6 +37,16 @@ pub struct PlannedChange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ActivityEntry {
+    pub batch: String,
+    pub done: usize,
+    pub undone: usize,
+    pub failed: usize,
+    pub recorded_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchReport {
     pub batch: String,
     pub applied: usize,
@@ -92,6 +102,22 @@ impl Tidyfile {
             .interrupted()?
             .iter()
             .map(|record| describe(&record.operation))
+            .collect())
+    }
+
+    pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
+        Ok(self
+            .executor
+            .journal()
+            .recent_batches(limit)?
+            .into_iter()
+            .map(|summary| ActivityEntry {
+                batch: summary.batch,
+                done: summary.done,
+                undone: summary.undone,
+                failed: summary.failed,
+                recorded_at: summary.recorded_at,
+            })
             .collect())
     }
 
