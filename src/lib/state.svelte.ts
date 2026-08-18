@@ -1,10 +1,12 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   activity,
+  interrupted,
   isIpcError,
   loadRules,
   organize,
   saveRules,
+  settleInterrupted,
   simulate,
   startWatching,
   stopWatching,
@@ -35,6 +37,7 @@ export class Workspace {
   history = $state<ActivityEntry[]>([]);
   status = $state<Status>({ kind: "idle" });
   watching = $state(false);
+  unfinished = $state<PlannedChange[]>([]);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -49,6 +52,7 @@ export class Workspace {
     await this.attempt(async () => {
       this.rules = await loadRules();
       this.history = await activity();
+      this.unfinished = await interrupted();
       const watched = await watchedFolder();
       if (watched !== null) {
         this.folder = watched;
@@ -57,6 +61,14 @@ export class Workspace {
     });
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
+    });
+  }
+
+  async acknowledgeUnfinished(): Promise<void> {
+    await this.attempt(async () => {
+      await settleInterrupted();
+      this.unfinished = await interrupted();
+      this.history = await activity();
     });
   }
 

@@ -162,6 +162,34 @@
   {:else if activeView === "activity"}
     <section aria-labelledby="activity-heading">
       <h2 id="activity-heading">Activity</h2>
+
+      {#if workspace.unfinished.length > 0}
+        <div class="unfinished" role="status">
+          <p>
+            <strong
+              >{workspace.unfinished.length} operation{workspace.unfinished.length === 1
+                ? ""
+                : "s"} never finished.</strong
+            >
+            A previous run was interrupted before these were confirmed, so they may or may not have
+            been applied. Check the files below before dismissing.
+          </p>
+          <ul>
+            {#each workspace.unfinished as change, index (index)}
+              <li>
+                <span class="kind {change.kind}">{change.kind}</span>
+                <span class="from">{fileName(change.source)}</span>
+                {#if change.destination !== null}
+                  <span class="arrow" aria-hidden="true">-&gt;</span>
+                  <span class="to">{change.destination}</span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+          <button onclick={() => workspace.acknowledgeUnfinished()}>Dismiss</button>
+        </div>
+      {/if}
+
       {#if workspace.history.length === 0}
         <p class="empty">Nothing has run yet.</p>
       {:else}
@@ -357,6 +385,25 @@
     border-radius: 0.375rem;
     padding: 0.6rem 0.8rem;
     margin-block: 1rem 0;
+  }
+
+  .unfinished {
+    border: 1px solid;
+    border-radius: 0.375rem;
+    padding: 0.8rem;
+    margin-block: 0.75rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .unfinished > p {
+    margin: 0;
+    font-size: 0.9rem;
+  }
+
+  .unfinished button {
+    align-self: flex-start;
   }
 
   .switch {

@@ -143,6 +143,14 @@ impl Journal {
         collect(rows)
     }
 
+    pub fn settle_interrupted(&self, detail: &str) -> Result<usize, JournalError> {
+        let changed = self.connection.execute(
+            "UPDATE operations SET state = ?1, detail = ?2 WHERE state = ?3",
+            params![State::Failed.as_text(), detail, State::Planned.as_text()],
+        )?;
+        Ok(changed)
+    }
+
     pub fn applied_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
             "SELECT id, batch, kind, source, destination FROM operations
@@ -446,5 +454,44 @@ mod tests {
         let summaries = journal.recent_batches(10).unwrap();
 
         assert_eq!((summaries[0].done, summaries[0].undone), (0, 1));
+    }
+
+    #[test]
+    fn settling_clears_interrupted_operations_and_reports_how_many() {
+        let journal = Journal::open_in_memory().unwrap();
+        journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        journal
+            .record_planned("batch-1", &move_operation("c", "d"))
+            .unwrap();
+
+        let settled = journal.settle_interrupted("interrupted run").unwrap();
+
+        assert_eq!(settled, 2);
+        assert!(journal.interrupted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn settling_does_not_disturb_finished_operations() {
+        let journal = Journal::open_in_memory().unwrap();
+        let done = journal
+            .record_planned("batch-1", &move_operation("a", "b"))
+            .unwrap();
+        journal.mark(done, State::Done, None).unwrap();
+        journal
+            .record_planned("batch-1", &move_operation("c", "d"))
+            .unwrap();
+
+        journal.settle_interrupted("interrupted run").unwrap();
+
+        assert_eq!(journal.applied_in_batch("batch-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn settling_nothing_reports_zero() {
+        let journal = Journal::open_in_memory().unwrap();
+
+        assert_eq!(journal.settle_interrupted("interrupted run").unwrap(), 0);
     }
 }

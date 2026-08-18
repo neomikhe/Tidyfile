@@ -25,6 +25,7 @@ pub fn run() -> tauri::Result<()> {
             ipc::organize,
             ipc::undo,
             ipc::interrupted,
+            ipc::settle_interrupted,
             ipc::load_rules,
             ipc::save_rules,
             ipc::activity,

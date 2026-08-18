@@ -107,6 +107,13 @@ impl Tidyfile {
             .collect())
     }
 
+    pub fn settle_interrupted(&self) -> Result<usize, ServiceError> {
+        Ok(self
+            .executor
+            .journal()
+            .settle_interrupted("interrupted run")?)
+    }
+
     pub fn organize_file(
         &self,
         rules: &[Rule],

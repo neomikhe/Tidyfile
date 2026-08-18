@@ -153,6 +153,12 @@ pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange
     off_thread(move || with(&service, Tidyfile::interrupted)).await
 }
 
+#[tauri::command]
+pub async fn settle_interrupted(state: State<'_, AppState>) -> Result<usize, IpcError> {
+    let service = state.service.clone();
+    off_thread(move || with(&service, Tidyfile::settle_interrupted)).await
+}
+
 const MAX_ACTIVITY: usize = 500;
 
 #[tauri::command]

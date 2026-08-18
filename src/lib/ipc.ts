@@ -115,3 +115,7 @@ export function stopWatching(): Promise<void> {
 export function watchedFolder(): Promise<string | null> {
   return invoke<string | null>("watched_folder");
 }
+
+export function settleInterrupted(): Promise<number> {
+  return invoke<number>("settle_interrupted");
+}
