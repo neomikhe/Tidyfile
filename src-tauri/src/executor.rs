@@ -111,6 +111,9 @@ impl Executor {
                     to: from.clone(),
                 },
             ),
+            Operation::Copy { to, .. } => {
+                self.apply_one(batch, &Operation::Trash { from: to.clone() })
+            }
             Operation::Trash { from } => Ok(restore::from_trash(from)),
         }
     }
@@ -119,6 +122,7 @@ impl Executor {
 fn perform(operation: &Operation) -> Result<(), ActionError> {
     match operation {
         Operation::Move { from, to } => move_file(from, to),
+        Operation::Copy { from, to } => copy_file(from, to),
         Operation::Trash { from } => Ok(trash::delete(from)?),
     }
 }
@@ -130,30 +134,53 @@ fn move_file(from: &Path, to: &Path) -> Result<(), ActionError> {
     if fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_then_trash(from, to)
+    copy_file(from, to)?;
+    Ok(trash::delete(from)?)
 }
 
-fn copy_then_trash(from: &Path, to: &Path) -> Result<(), ActionError> {
+fn copy_file(from: &Path, to: &Path) -> Result<(), ActionError> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let original = fs::metadata(from)?.len();
     let copied = fs::copy(from, to)?;
     if copied != original {
         let _ = trash::delete(to);
         return Err(ActionError::IncompleteCopy);
     }
-    Ok(trash::delete(from)?)
+    Ok(())
 }
 
 fn without_collision(operation: &Operation) -> Result<Operation, ActionError> {
-    let Operation::Move { from, to } = operation else {
+    let Some(destination) = destination_of(operation) else {
         return Ok(operation.clone());
     };
-    if !to.exists() {
+    if !destination.exists() {
         return Ok(operation.clone());
     }
-    Ok(Operation::Move {
-        from: from.clone(),
-        to: free_name(to).ok_or(ActionError::NoFreeName)?,
-    })
+    let free = free_name(destination).ok_or(ActionError::NoFreeName)?;
+    Ok(retarget(operation, free))
+}
+
+fn destination_of(operation: &Operation) -> Option<&Path> {
+    match operation {
+        Operation::Move { to, .. } | Operation::Copy { to, .. } => Some(to),
+        Operation::Trash { .. } => None,
+    }
+}
+
+fn retarget(operation: &Operation, to: PathBuf) -> Operation {
+    match operation {
+        Operation::Move { from, .. } => Operation::Move {
+            from: from.clone(),
+            to,
+        },
+        Operation::Copy { from, .. } => Operation::Copy {
+            from: from.clone(),
+            to,
+        },
+        Operation::Trash { from } => Operation::Trash { from: from.clone() },
+    }
 }
 
 fn free_name(desired: &Path) -> Option<PathBuf> {
@@ -421,5 +448,79 @@ mod tests {
         } else {
             assert!(doomed.exists(), "the file was not restored from the trash");
         }
+    }
+
+    #[test]
+    fn a_copy_leaves_the_original_where_it_was() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("report.pdf");
+        let duplicate = root.path().join("backup/report.pdf");
+        write(&source, "content");
+        let executor = executor();
+
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Copy {
+                    from: source.clone(),
+                    to: duplicate.clone(),
+                }],
+            )
+            .unwrap();
+
+        assert!(source.exists(), "the original must survive a copy");
+        assert_eq!(fs::read_to_string(&duplicate).unwrap(), "content");
+    }
+
+    #[test]
+    fn undoing_a_copy_removes_the_duplicate_and_spares_the_original() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("report.pdf");
+        let duplicate = root.path().join("backup/report.pdf");
+        write(&source, "content");
+        let executor = executor();
+
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Copy {
+                    from: source.clone(),
+                    to: duplicate.clone(),
+                }],
+            )
+            .unwrap();
+        executor.undo_batch("batch-1").unwrap();
+
+        assert!(!duplicate.exists(), "the duplicate was not removed");
+        assert_eq!(
+            fs::read_to_string(&source).unwrap(),
+            "content",
+            "undoing a copy must never touch the original"
+        );
+    }
+
+    #[test]
+    fn a_copy_onto_an_existing_file_gets_a_suffix() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("backup/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+
+        let outcomes = executor()
+            .apply(
+                "batch-1",
+                &[Operation::Copy {
+                    from: source,
+                    to: occupied.clone(),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
+        let Outcome::Applied(Operation::Copy { to, .. }) = &outcomes[0] else {
+            panic!("expected an applied copy, got {:?}", outcomes[0]);
+        };
+        assert_eq!(to.file_name().unwrap(), "notes (2).txt");
     }
 }

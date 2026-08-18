@@ -2,7 +2,7 @@ pub mod condition;
 pub mod evaluator;
 
 pub use condition::{Condition, ConditionError, FileFacts};
-pub use evaluator::{EvaluationError, plan};
+pub use evaluator::{EvaluationError, PlanContext, plan};
 
 use std::path::PathBuf;
 
@@ -22,7 +22,19 @@ pub enum Combinator {
     rename_all_fields = "camelCase"
 )]
 pub enum Action {
-    MoveTo { folder: PathBuf },
+    MoveTo {
+        folder: PathBuf,
+        #[serde(default)]
+        rename: Option<String>,
+    },
+    CopyTo {
+        folder: PathBuf,
+        #[serde(default)]
+        rename: Option<String>,
+    },
+    RenameTo {
+        template: String,
+    },
     Trash,
 }
 

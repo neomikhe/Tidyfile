@@ -35,6 +35,7 @@ pub enum JournalError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     Move { from: PathBuf, to: PathBuf },
+    Copy { from: PathBuf, to: PathBuf },
     Trash { from: PathBuf },
 }
 
@@ -42,19 +43,20 @@ impl Operation {
     fn kind(&self) -> &str {
         match self {
             Self::Move { .. } => "move",
+            Self::Copy { .. } => "copy",
             Self::Trash { .. } => "trash",
         }
     }
 
     pub fn source(&self) -> &Path {
         match self {
-            Self::Move { from, .. } | Self::Trash { from } => from,
+            Self::Move { from, .. } | Self::Copy { from, .. } | Self::Trash { from } => from,
         }
     }
 
     fn destination(&self) -> Option<&Path> {
         match self {
-            Self::Move { to, .. } => Some(to),
+            Self::Move { to, .. } | Self::Copy { to, .. } => Some(to),
             Self::Trash { .. } => None,
         }
     }
@@ -187,6 +189,12 @@ fn rebuild(
     match kind {
         "move" => Ok(Operation::Move {
             from: PathBuf::from(source),
+            to: destination
+                .map(PathBuf::from)
+                .ok_or(JournalError::MissingDestination)?,
+        }),
+        "copy" => Ok(Operation::Copy {
+            from: PathBuf::from(source.clone()),
             to: destination
                 .map(PathBuf::from)
                 .ok_or(JournalError::MissingDestination)?,
