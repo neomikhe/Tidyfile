@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { Workspace } from "$lib/state.svelte";
+  import RuleEditor from "$lib/RuleEditor.svelte";
+  import { blankRule, isIncomplete } from "$lib/factories";
 
   type View = "rules" | "activity" | "settings";
 
@@ -13,10 +15,22 @@
 
   const workspace = new Workspace();
   let activeView = $state<View>("rules");
+  let editingId = $state<string | null>(null);
 
   onMount(() => {
     void workspace.initialise();
   });
+
+  async function createRule(): Promise<void> {
+    const rule = blankRule();
+    editingId = rule.id;
+    await workspace.add(rule);
+  }
+
+  async function closeEditor(): Promise<void> {
+    editingId = null;
+    await workspace.commit();
+  }
 
   async function pickFolder(): Promise<void> {
     const picked = await open({ directory: true, multiple: false });
@@ -64,23 +78,55 @@
       {:else}
         <ul class="rules">
           {#each workspace.rules as rule (rule.id)}
-            <li>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={rule.enabled}
-                  onchange={() => workspace.toggle(rule.id)}
+            <li class="rule">
+              <div class="summary-row">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    disabled={isIncomplete(rule)}
+                    onchange={() => workspace.toggle(rule.id)}
+                  />
+                  <span class="name">{rule.name}</span>
+                </label>
+                <span class="detail">
+                  {#if isIncomplete(rule)}
+                    Needs a value before it can run
+                  {:else}
+                    {rule.conditions.length} condition{rule.conditions.length === 1 ? "" : "s"},
+                    {rule.actions.length} action{rule.actions.length === 1 ? "" : "s"}
+                  {/if}
+                </span>
+                <button
+                  onclick={() => {
+                    if (editingId === rule.id) {
+                      void closeEditor();
+                    } else {
+                      editingId = rule.id;
+                    }
+                  }}
+                >
+                  {editingId === rule.id ? "Close" : "Edit"}
+                </button>
+              </div>
+
+              {#if editingId === rule.id}
+                <RuleEditor
+                  {rule}
+                  onchange={(edited) => workspace.edit(edited)}
+                  onremove={() => {
+                    editingId = null;
+                    void workspace.remove(rule.id);
+                  }}
+                  ondone={closeEditor}
                 />
-                <span class="name">{rule.name}</span>
-              </label>
-              <span class="detail">
-                {rule.conditions.length} condition{rule.conditions.length === 1 ? "" : "s"},
-                {rule.actions.length} action{rule.actions.length === 1 ? "" : "s"}
-              </span>
+              {/if}
             </li>
           {/each}
         </ul>
       {/if}
+
+      <button onclick={createRule}>New rule</button>
 
       <h2>Preview</h2>
       {#if workspace.folder === null}
@@ -230,6 +276,19 @@
     padding: 0.5rem 0.7rem;
     border: 1px solid;
     border-radius: 0.375rem;
+  }
+
+  li.rule {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .summary-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    justify-content: space-between;
   }
 
   label {

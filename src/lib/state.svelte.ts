@@ -13,6 +13,10 @@ import {
 
 export type Status = { kind: "idle" } | { kind: "working" } | { kind: "problem"; message: string };
 
+function flip(rule: Rule): Rule {
+  return { ...rule, enabled: !rule.enabled };
+}
+
 function describe(error: unknown): string {
   if (isIpcError(error)) {
     return error.message;
@@ -43,11 +47,31 @@ export class Workspace {
   }
 
   async toggle(id: string): Promise<void> {
-    this.rules = this.rules.map((rule) =>
-      rule.id === id ? { ...rule, enabled: !rule.enabled } : rule,
-    );
+    await this.replace(this.rules.map((rule) => (rule.id === id ? flip(rule) : rule)));
+  }
+
+  async add(rule: Rule): Promise<void> {
+    await this.replace([...this.rules, rule]);
+  }
+
+  edit(edited: Rule): void {
+    this.rules = this.rules.map((rule) => (rule.id === edited.id ? edited : rule));
     this.preview = null;
+  }
+
+  async commit(): Promise<void> {
     await this.attempt(() => saveRules(this.rules));
+    await this.refreshPreview();
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.replace(this.rules.filter((rule) => rule.id !== id));
+  }
+
+  private async replace(rules: Rule[]): Promise<void> {
+    this.rules = rules;
+    await this.attempt(() => saveRules(rules));
+    await this.refreshPreview();
   }
 
   async chooseFolder(picked: string): Promise<void> {
