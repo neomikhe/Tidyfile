@@ -35,6 +35,7 @@ pub enum Collision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     SourceVanished,
+    AlreadyInPlace,
     DestinationTaken,
     NothingToUndo,
     RestoreUnsupported,
@@ -81,6 +82,9 @@ impl Executor {
     ) -> Result<Outcome, ExecutorError> {
         if !operation.source().exists() {
             return Ok(Outcome::Skipped(SkipReason::SourceVanished));
+        }
+        if is_already_in_place(operation) {
+            return Ok(Outcome::Skipped(SkipReason::AlreadyInPlace));
         }
         let id = self.journal.record_planned(batch, operation)?;
         let claimed = match claim(operation, on_collision) {
@@ -241,6 +245,17 @@ fn discard_reservation(operation: &Operation) {
     };
     if fs::metadata(destination).is_ok_and(|data| data.len() == 0) {
         let _ = trash::delete(destination);
+    }
+}
+
+fn is_already_in_place(operation: &Operation) -> bool {
+    destination_of(operation).is_some_and(|destination| same_file(operation.source(), destination))
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -849,5 +864,81 @@ mod tests {
         let outcome = executor().undo_operation(9_999).unwrap();
 
         assert_eq!(outcome, Outcome::Skipped(SkipReason::NothingToUndo));
+    }
+
+    #[test]
+    fn moving_a_file_onto_itself_is_skipped_rather_than_renamed() {
+        let root = TempDir::new().unwrap();
+        let file = root.path().join("invoice.pdf");
+        write(&file, "content");
+        let executor = executor();
+
+        let outcomes = executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: file.clone(),
+                    to: file.clone(),
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes, [Outcome::Skipped(SkipReason::AlreadyInPlace)]);
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "the file was duplicated instead of left alone"
+        );
+    }
+
+    #[test]
+    fn a_no_op_move_is_never_journaled() {
+        let root = TempDir::new().unwrap();
+        let file = root.path().join("invoice.pdf");
+        write(&file, "content");
+        let executor = executor();
+
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: file.clone(),
+                    to: file,
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert!(executor.journal().interrupted().unwrap().is_empty());
+        assert!(
+            executor
+                .journal()
+                .operations_in_batch("batch-1")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_genuine_move_to_a_different_name_still_runs() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("invoice.pdf");
+        let destination = root.path().join("PDFs/invoice.pdf");
+        write(&source, "content");
+
+        let outcomes = executor()
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: destination.clone(),
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert!(matches!(outcomes[0], Outcome::Applied(_)));
+        assert!(destination.exists() && !source.exists());
     }
 }

@@ -231,3 +231,50 @@ fn two_folders_holding_the_same_name_both_survive_the_move() {
     assert!(contents.contains(&"from the first folder".to_owned()));
     assert!(contents.contains(&"from the second folder".to_owned()));
 }
+
+#[test]
+fn a_rule_whose_destination_sits_inside_the_watched_folder_settles() {
+    let watched = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    put(&watched.path().join("invoice.pdf"), "content");
+    let inside = watched.path().join("PDFs");
+    let rules = vec![Rule {
+        id: "r1".into(),
+        name: "pdfs".into(),
+        enabled: true,
+        combinator: Combinator::All,
+        conditions: vec![Condition::Extension {
+            any_of: vec!["pdf".into()],
+        }],
+        actions: vec![Action::MoveTo {
+            folder: inside.clone(),
+            subfolder: None,
+            rename: None,
+        }],
+    }];
+    let folders = vec![watched.path().to_path_buf()];
+    let service = Tidyfile::open(&config.path().join("journal.sqlite")).unwrap();
+
+    service
+        .organize(&rules, &folders, Collision::Suffix)
+        .unwrap();
+    assert!(
+        inside.join("invoice.pdf").exists(),
+        "the first pass moved it"
+    );
+
+    let second = service
+        .organize(&rules, &folders, Collision::Suffix)
+        .unwrap();
+
+    let landed: Vec<String> = fs::read_dir(&inside)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        landed,
+        ["invoice.pdf"],
+        "the file was duplicated by moving it onto itself: {landed:?}, report {second:?}"
+    );
+}
