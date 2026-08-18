@@ -268,7 +268,7 @@
     font: inherit;
     font-size: 0.9rem;
     min-width: 0;
-    flex: 1 1 8rem;
+    flex: 1 1 16rem;
   }
 
   select {
