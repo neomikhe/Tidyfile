@@ -13,11 +13,21 @@ pub enum StoreError {
 }
 
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StoreError> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(serde_json::from_str(&contents)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(error) => Err(StoreError::Unreachable(error)),
-    }
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(StoreError::Unreachable(error)),
+    };
+    serde_json::from_str(&contents).map_err(|problem| {
+        set_aside(path, &contents);
+        StoreError::Malformed(problem)
+    })
+}
+
+fn set_aside(path: &Path, contents: &str) {
+    let mut rescued = path.as_os_str().to_owned();
+    rescued.push(".broken");
+    let _ = fs::write(PathBuf::from(rescued), contents);
 }
 
 pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<(), StoreError> {
@@ -131,5 +141,23 @@ mod tests {
         save(&path, &Vec::<Rule>::new()).unwrap();
 
         assert!(load::<Vec<Rule>>(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_file_is_set_aside_so_it_cannot_be_overwritten() {
+        let folder = TempDir::new().unwrap();
+        let path = folder.path().join("rules.json");
+        fs::write(&path, "{ this was the user's careful work but is not json").unwrap();
+
+        let outcome = load::<Vec<Rule>>(&path);
+        assert!(matches!(outcome, Err(StoreError::Malformed(_))));
+
+        save(&path, &[sample()]).unwrap();
+
+        let rescued = fs::read_to_string(folder.path().join("rules.json.broken")).unwrap();
+        assert!(
+            rescued.contains("careful work"),
+            "the unreadable file was overwritten and its contents are gone"
+        );
     }
 }

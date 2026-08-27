@@ -12,7 +12,22 @@ const backend = {
   failNext: null as { code: string; message: string } | null,
   manualRestore: 0,
   report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 },
+  gate: null as null | (() => void),
 };
+
+function waitAtGate(): Promise<void> {
+  return new Promise((resolve) => {
+    if (backend.gate === null) {
+      resolve();
+      return;
+    }
+    const previous = backend.gate;
+    backend.gate = () => {
+      previous();
+      resolve();
+    };
+  });
+}
 
 function maybeFail(): void {
   if (backend.failNext !== null) {
@@ -37,6 +52,7 @@ vi.mock("./ipc", async (original) => {
       backend.settings = settings;
     }),
     simulate: vi.fn(async () => {
+      await waitAtGate();
       maybeFail();
       backend.simulated += 1;
       return backend.preview;
@@ -97,6 +113,7 @@ beforeEach(() => {
   backend.failNext = null;
   backend.manualRestore = 0;
   backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 };
+  backend.gate = null;
 });
 
 describe("startup", () => {
@@ -389,5 +406,35 @@ describe("what a run reports back", () => {
     workspace.edit({ ...aRule("a", true), name: "renamed" });
 
     expect(workspace.lastRun).toBeNull();
+  });
+});
+
+describe("two things happening at once", () => {
+  test("the interface stays busy until the last one finishes", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    backend.gate = () => undefined;
+    const first = workspace.refreshPreview();
+    const second = workspace.refreshPreview();
+    expect(workspace.status.kind).toBe("working");
+
+    backend.gate?.();
+    backend.gate = null;
+    await Promise.all([first, second]);
+
+    expect(workspace.status.kind).toBe("idle");
+  });
+
+  test("a failure during overlapping work is not erased by the other finishing", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    backend.failNext = { code: "folderNotFound", message: "gone" };
+
+    await Promise.all([workspace.refreshPreview(), workspace.refreshPreview()]);
+
+    expect(workspace.status.kind).toBe("problem");
   });
 });

@@ -272,14 +272,24 @@ export class Workspace {
     });
   }
 
+  private inFlight = 0;
+  private failure: string | null = null;
+
   private async attempt(work: () => Promise<void>): Promise<void> {
+    this.inFlight += 1;
     this.status = { kind: "working" };
     try {
       await work();
-      this.status = { kind: "idle" };
     } catch (error) {
       this.preview = null;
-      this.status = { kind: "problem", message: describe(error) };
+      this.failure = describe(error);
+    } finally {
+      this.inFlight -= 1;
+      if (this.inFlight === 0) {
+        this.status =
+          this.failure === null ? { kind: "idle" } : { kind: "problem", message: this.failure };
+        this.failure = null;
+      }
     }
   }
 }
