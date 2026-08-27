@@ -33,6 +33,7 @@ pub fn run() -> tauri::Result<()> {
             ipc::load_settings,
             ipc::save_settings,
             ipc::undo_operation,
+            ipc::resolve_conflicts,
             ipc::operations,
             ipc::start_watching,
             ipc::stop_watching,

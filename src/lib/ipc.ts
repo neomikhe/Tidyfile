@@ -121,7 +121,7 @@ export function settleInterrupted(): Promise<number> {
   return invoke<number>("settle_interrupted");
 }
 
-export type Collision = "suffix" | "skip";
+export type Collision = "suffix" | "skip" | "ask";
 
 export interface Settings {
   folders: string[];
@@ -152,4 +152,8 @@ export function operations(batch: string): Promise<RecordedChange[]> {
 
 export function undoOperation(id: number): Promise<BatchReport> {
   return invoke<BatchReport>("undo_operation", { id });
+}
+
+export function resolveConflicts(batch: string, keepBoth: boolean): Promise<BatchReport> {
+  return invoke<BatchReport>("resolve_conflicts", { batch, keepBoth });
 }

@@ -210,6 +210,20 @@
                 >
                   {workspace.expanded === entry.batch ? "Hide files" : "Show files"}
                 </button>
+                {#if entry.skipped > 0}
+                  <button
+                    disabled={workspace.status.kind === "working"}
+                    onclick={() => workspace.decideConflicts(entry.batch, true)}
+                  >
+                    Keep both
+                  </button>
+                  <button
+                    disabled={workspace.status.kind === "working"}
+                    onclick={() => workspace.decideConflicts(entry.batch, false)}
+                  >
+                    Leave them
+                  </button>
+                {/if}
                 <button
                   disabled={entry.done === 0 || workspace.status.kind === "working"}
                   onclick={() => workspace.revert(entry.batch)}
@@ -274,9 +288,14 @@
         >
           <option value="suffix">Keep both, adding a number</option>
           <option value="skip">Leave the file where it is</option>
+          <option value="ask">Ask me each time</option>
         </select>
       </label>
-      <p class="note">Either way, the file already at the destination is never replaced.</p>
+      <p class="note">
+        Whichever you choose, the file already at the destination is never replaced. Choosing to be
+        asked leaves those files untouched and gathers them in Activity, so you decide once instead
+        of being interrupted for every file.
+      </p>
 
       <h3>Watch continuously</h3>
       <label class="switch">

@@ -168,6 +168,26 @@ pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange
 }
 
 #[tauri::command]
+pub async fn resolve_conflicts(
+    state: State<'_, AppState>,
+    batch: String,
+    keep_both: bool,
+) -> Result<BatchReport, IpcError> {
+    let service = state.service.clone();
+    let choice = if keep_both {
+        Collision::Suffix
+    } else {
+        Collision::Skip
+    };
+    off_thread(move || {
+        with(&service, |tidyfile| {
+            tidyfile.resolve_conflicts(&batch, choice)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn undo_operation(state: State<'_, AppState>, id: i64) -> Result<BatchReport, IpcError> {
     let service = state.service.clone();
     off_thread(move || with(&service, |tidyfile| tidyfile.undo_operation(id))).await

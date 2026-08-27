@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::journal::{Journal, JournalError, Operation, State};
+use crate::journal::{Journal, JournalError, Operation, RecordedOperation, State};
 
 const MAX_NAME_ATTEMPTS: u32 = 100;
 
@@ -30,6 +30,7 @@ pub enum Collision {
     #[default]
     Suffix,
     Skip,
+    Ask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,13 +81,43 @@ impl Executor {
         operation: &Operation,
         on_collision: Collision,
     ) -> Result<Outcome, ExecutorError> {
-        if !operation.source().exists() {
-            return Ok(Outcome::Skipped(SkipReason::SourceVanished));
-        }
-        if is_already_in_place(operation) {
-            return Ok(Outcome::Skipped(SkipReason::AlreadyInPlace));
+        if let Some(refusal) = refuse_early(operation) {
+            return Ok(refusal);
         }
         let id = self.journal.record_planned(batch, operation)?;
+        self.carry_out(id, operation, on_collision)
+    }
+
+    pub fn retry_skipped(
+        &self,
+        batch: &str,
+        on_collision: Collision,
+    ) -> Result<Vec<Outcome>, ExecutorError> {
+        let waiting = self.journal.skipped_in_batch(batch)?;
+        waiting
+            .iter()
+            .map(|record| self.retry_one(record, on_collision))
+            .collect()
+    }
+
+    fn retry_one(
+        &self,
+        record: &RecordedOperation,
+        on_collision: Collision,
+    ) -> Result<Outcome, ExecutorError> {
+        if let Some(refusal) = refuse_early(&record.operation) {
+            return Ok(refusal);
+        }
+        self.journal.mark(record.id, State::Planned, None)?;
+        self.carry_out(record.id, &record.operation, on_collision)
+    }
+
+    fn carry_out(
+        &self,
+        id: i64,
+        operation: &Operation,
+        on_collision: Collision,
+    ) -> Result<Outcome, ExecutorError> {
         let claimed = match claim(operation, on_collision) {
             Ok(Some(claimed)) => claimed,
             Ok(None) => return self.step_aside(id),
@@ -219,14 +250,14 @@ fn reserve(desired: &Path, on_collision: Collision) -> Result<Option<PathBuf>, A
         }
     }
     match on_collision {
-        Collision::Skip => Ok(None),
+        Collision::Skip | Collision::Ask => Ok(None),
         Collision::Suffix => Err(ActionError::NoFreeName),
     }
 }
 
 fn candidates(desired: &Path, on_collision: Collision) -> Vec<PathBuf> {
     let mut names = vec![desired.to_path_buf()];
-    if on_collision == Collision::Skip {
+    if on_collision != Collision::Suffix {
         return names;
     }
     let (Some(parent), Some(stem)) = (desired.parent(), desired.file_stem()) else {
@@ -246,6 +277,16 @@ fn discard_reservation(operation: &Operation) {
     if fs::metadata(destination).is_ok_and(|data| data.len() == 0) {
         let _ = trash::delete(destination);
     }
+}
+
+fn refuse_early(operation: &Operation) -> Option<Outcome> {
+    if !operation.source().exists() {
+        return Some(Outcome::Skipped(SkipReason::SourceVanished));
+    }
+    if is_already_in_place(operation) {
+        return Some(Outcome::Skipped(SkipReason::AlreadyInPlace));
+    }
+    None
 }
 
 fn is_already_in_place(operation: &Operation) -> bool {
@@ -940,5 +981,137 @@ mod tests {
 
         assert!(matches!(outcomes[0], Outcome::Applied(_)));
         assert!(destination.exists() && !source.exists());
+    }
+
+    #[test]
+    fn the_ask_policy_leaves_the_conflict_for_the_user_to_decide() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+        let executor = executor();
+
+        let outcomes = executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: occupied.clone(),
+                }],
+                Collision::Ask,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes, [Outcome::Skipped(SkipReason::DestinationTaken)]);
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
+        assert!(source.exists(), "nothing moves until the user decides");
+        assert_eq!(
+            executor
+                .journal()
+                .skipped_in_batch("batch-1")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn choosing_to_keep_both_resolves_the_waiting_conflict() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+        let executor = executor();
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: occupied.clone(),
+                }],
+                Collision::Ask,
+            )
+            .unwrap();
+
+        let resolved = executor
+            .retry_skipped("batch-1", Collision::Suffix)
+            .unwrap();
+
+        assert!(matches!(resolved[0], Outcome::Applied(_)));
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(root.path().join("archive/notes (2).txt")).unwrap(),
+            "new"
+        );
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn a_resolved_conflict_stops_waiting_and_becomes_undoable() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+        let executor = executor();
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source,
+                    to: occupied,
+                }],
+                Collision::Ask,
+            )
+            .unwrap();
+
+        executor
+            .retry_skipped("batch-1", Collision::Suffix)
+            .unwrap();
+
+        assert!(
+            executor
+                .journal()
+                .skipped_in_batch("batch-1")
+                .unwrap()
+                .is_empty(),
+            "the row was reused, so the conflict is no longer waiting"
+        );
+        assert_eq!(
+            executor
+                .journal()
+                .applied_in_batch("batch-1")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn choosing_to_leave_them_keeps_the_conflict_untouched() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("notes.txt");
+        let occupied = root.path().join("archive/notes.txt");
+        write(&source, "new");
+        write(&occupied, "existing");
+        let executor = executor();
+        executor
+            .apply(
+                "batch-1",
+                &[Operation::Move {
+                    from: source.clone(),
+                    to: occupied.clone(),
+                }],
+                Collision::Ask,
+            )
+            .unwrap();
+
+        let resolved = executor.retry_skipped("batch-1", Collision::Skip).unwrap();
+
+        assert_eq!(resolved, [Outcome::Skipped(SkipReason::DestinationTaken)]);
+        assert!(source.exists());
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "existing");
     }
 }

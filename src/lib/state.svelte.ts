@@ -15,6 +15,7 @@ import {
   undo,
   undoOperation,
   operations as operationsIn,
+  resolveConflicts,
   watchedFolders,
   type ActivityEntry,
   type Collision,
@@ -204,6 +205,17 @@ export class Workspace {
     this.expanded = batch;
     await this.attempt(async () => {
       this.details = await operationsIn(batch);
+    });
+  }
+
+  async decideConflicts(batch: string, keepBoth: boolean): Promise<void> {
+    await this.attempt(async () => {
+      await resolveConflicts(batch, keepBoth);
+      this.history = await activity();
+      if (this.expanded === batch) {
+        this.details = await operationsIn(batch);
+      }
+      await this.refreshPreview();
     });
   }
 

@@ -190,6 +190,15 @@ impl Journal {
         Ok(changed)
     }
 
+    pub fn skipped_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, batch, kind, source, destination, state FROM operations
+             WHERE batch = ?1 AND state = ?2 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![batch, State::Skipped.as_text()], read_row)?;
+        collect(rows)
+    }
+
     pub fn applied_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
             "SELECT id, batch, kind, source, destination, state FROM operations

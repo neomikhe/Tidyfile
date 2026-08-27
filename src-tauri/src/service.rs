@@ -146,6 +146,15 @@ impl Tidyfile {
         Ok(summarize(batch, &outcomes))
     }
 
+    pub fn resolve_conflicts(
+        &self,
+        batch: &str,
+        on_collision: Collision,
+    ) -> Result<BatchReport, ServiceError> {
+        let outcomes = self.executor.retry_skipped(batch, on_collision)?;
+        Ok(summarize(batch.to_owned(), &outcomes))
+    }
+
     pub fn undo_operation(&self, id: i64) -> Result<BatchReport, ServiceError> {
         let outcome = self.executor.undo_operation(id)?;
         Ok(summarize(String::new(), std::slice::from_ref(&outcome)))
