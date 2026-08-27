@@ -10,6 +10,7 @@ const backend = {
   saved: 0,
   simulated: 0,
   failNext: null as { code: string; message: string } | null,
+  manualRestore: 0,
 };
 
 function maybeFail(): void {
@@ -39,9 +40,27 @@ vi.mock("./ipc", async (original) => {
       backend.simulated += 1;
       return backend.preview;
     }),
-    organize: vi.fn(async () => ({ batch: "b1", applied: 1, skipped: 0, failed: 0 })),
-    undo: vi.fn(async () => ({ batch: "b1", applied: 1, skipped: 0, failed: 0 })),
-    undoOperation: vi.fn(async () => ({ batch: "b1", applied: 1, skipped: 0, failed: 0 })),
+    organize: vi.fn(async () => ({
+      batch: "b1",
+      applied: 1,
+      skipped: 0,
+      failed: 0,
+      needsManualRestore: 0,
+    })),
+    undo: vi.fn(async () => ({
+      batch: "b1",
+      applied: 1,
+      skipped: 0,
+      failed: 0,
+      needsManualRestore: backend.manualRestore,
+    })),
+    undoOperation: vi.fn(async () => ({
+      batch: "b1",
+      applied: 1,
+      skipped: 0,
+      failed: 0,
+      needsManualRestore: 0,
+    })),
     operations: vi.fn(async () => []),
     activity: vi.fn(async () => backend.history),
     interrupted: vi.fn(async () => backend.unfinished),
@@ -81,6 +100,7 @@ beforeEach(() => {
   backend.saved = 0;
   backend.simulated = 0;
   backend.failNext = null;
+  backend.manualRestore = 0;
 });
 
 describe("startup", () => {
@@ -312,5 +332,29 @@ describe("collision policy", () => {
 
     expect(workspace.onCollision).toBe("skip");
     expect(backend.settings.onCollision).toBe("skip");
+  });
+});
+
+describe("restoring from the trash", () => {
+  test("an undo the system cannot do is reported, not swallowed", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.manualRestore = 2;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect(workspace.manualRestore).toBe(2);
+  });
+
+  test("an undo that worked leaves no lingering notice", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.manualRestore = 0;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect(workspace.manualRestore).toBe(0);
   });
 });

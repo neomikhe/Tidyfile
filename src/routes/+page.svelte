@@ -163,6 +163,14 @@
     <section aria-labelledby="activity-heading">
       <h2 id="activity-heading">Activity</h2>
 
+      {#if workspace.manualRestore > 0}
+        <p class="unfinished" role="alert">
+          {workspace.manualRestore} file{workspace.manualRestore === 1 ? "" : "s"} could not be
+          brought back from the Trash automatically. This system does not allow it. Open the Trash
+          and use Put Back to restore {workspace.manualRestore === 1 ? "it" : "them"}.
+        </p>
+      {/if}
+
       {#if workspace.unfinished.length > 0}
         <div class="unfinished" role="status">
           <p>

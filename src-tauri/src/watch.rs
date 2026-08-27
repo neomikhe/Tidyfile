@@ -138,6 +138,7 @@ mod tests {
             applied,
             skipped,
             failed,
+            needs_manual_restore: 0,
         }
     }
 

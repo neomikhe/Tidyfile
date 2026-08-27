@@ -51,6 +51,7 @@ export class Workspace {
   expanded = $state<string | null>(null);
   details = $state<RecordedChange[]>([]);
   folderStates = $state<FolderStatus[]>([]);
+  manualRestore = $state(0);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -243,7 +244,7 @@ export class Workspace {
 
   async revertOne(id: number): Promise<void> {
     await this.attempt(async () => {
-      await undoOperation(id);
+      this.manualRestore = (await undoOperation(id)).needsManualRestore;
       this.history = await activity();
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);
@@ -256,7 +257,7 @@ export class Workspace {
 
   async revert(batch: string): Promise<void> {
     await this.attempt(async () => {
-      await undo(batch);
+      this.manualRestore = (await undo(batch)).needsManualRestore;
       this.history = await activity();
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);

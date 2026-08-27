@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::executor::{Collision, Executor, Outcome};
+use crate::executor::{Collision, Executor, Outcome, SkipReason};
 use crate::journal::{Journal, JournalError, Operation};
 use crate::paths::{self, PathError};
 use crate::rules::{EvaluationError, PlanContext, Rule, plan};
@@ -62,6 +62,7 @@ pub struct BatchReport {
     pub applied: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub needs_manual_restore: usize,
 }
 
 pub struct Tidyfile {
@@ -325,6 +326,9 @@ fn summarize(batch: String, outcomes: &[Outcome]) -> BatchReport {
         applied: count(outcomes, |outcome| matches!(outcome, Outcome::Applied(_))),
         skipped: count(outcomes, |outcome| matches!(outcome, Outcome::Skipped(_))),
         failed: count(outcomes, |outcome| matches!(outcome, Outcome::Failed(_))),
+        needs_manual_restore: count(outcomes, |outcome| {
+            matches!(outcome, Outcome::Skipped(SkipReason::RestoreUnsupported))
+        }),
     }
 }
 
@@ -338,6 +342,7 @@ fn nothing_happened() -> BatchReport {
         applied: 0,
         skipped: 0,
         failed: 0,
+        needs_manual_restore: 0,
     }
 }
 
