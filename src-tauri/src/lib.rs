@@ -18,7 +18,9 @@ pub fn run() -> tauri::Result<()> {
         .setup(|app| {
             let folder = app.path().app_data_dir()?;
             std::fs::create_dir_all(&folder)?;
-            app.manage(ipc::AppState::open(&folder)?);
+            let state = ipc::AppState::open(&folder)?;
+            state.resume(app.handle());
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

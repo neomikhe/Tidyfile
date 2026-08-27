@@ -10,6 +10,7 @@ use crate::ipc::current_collision;
 use crate::paths;
 use crate::rules::Rule;
 use crate::service::{BatchReport, ServiceError, Tidyfile};
+use crate::settings::Settings;
 use crate::store;
 use crate::watcher::FolderWatcher;
 
@@ -37,6 +38,29 @@ impl Drop for WatchSession {
             let _ = worker.join();
         }
     }
+}
+
+pub fn resume(
+    app: &AppHandle,
+    service: Arc<Mutex<Tidyfile>>,
+    rules_file: &Path,
+    settings_file: &Path,
+) -> Vec<WatchSession> {
+    let settings: Settings = store::load(settings_file).unwrap_or_default();
+    settings
+        .watched
+        .iter()
+        .filter_map(|folder| {
+            start(
+                app.clone(),
+                service.clone(),
+                rules_file.to_path_buf(),
+                settings_file.to_path_buf(),
+                folder,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 pub fn start(
@@ -93,8 +117,50 @@ fn tidy_one(
 }
 
 fn announce(app: &AppHandle, report: BatchReport) {
-    if report.applied == 0 && report.failed == 0 {
+    if !worth_announcing(&report) {
         return;
     }
     let _ = app.emit(TIDIED_EVENT, report);
+}
+
+fn worth_announcing(report: &BatchReport) -> bool {
+    report.applied > 0 || report.failed > 0 || report.skipped > 0
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn report(applied: usize, skipped: usize, failed: usize) -> BatchReport {
+        BatchReport {
+            batch: "b1".into(),
+            applied,
+            skipped,
+            failed,
+        }
+    }
+
+    #[test]
+    fn work_that_moved_a_file_is_announced() {
+        assert!(worth_announcing(&report(1, 0, 0)));
+    }
+
+    #[test]
+    fn work_that_failed_is_announced() {
+        assert!(worth_announcing(&report(0, 0, 1)));
+    }
+
+    #[test]
+    fn a_conflict_left_waiting_is_announced_too() {
+        assert!(
+            worth_announcing(&report(0, 1, 0)),
+            "with the ask policy nothing is applied, so a silent skip would look like a dead watcher"
+        );
+    }
+
+    #[test]
+    fn a_file_no_rule_cared_about_stays_quiet() {
+        assert!(!worth_announcing(&report(0, 0, 0)));
+    }
 }

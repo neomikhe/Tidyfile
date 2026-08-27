@@ -71,6 +71,18 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn resume(&self, app: &AppHandle) {
+        let restored = watch::resume(
+            app,
+            self.service.clone(),
+            &self.rules_file,
+            &self.settings_file,
+        );
+        if let Ok(mut running) = self.sessions.lock() {
+            *running = restored;
+        }
+    }
+
     pub fn open(folder: &Path) -> Result<Self, ServiceError> {
         Ok(Self {
             service: Arc::new(Mutex::new(Tidyfile::open(&folder.join("journal.sqlite"))?)),

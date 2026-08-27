@@ -178,7 +178,11 @@ impl Tidyfile {
     }
 
     pub fn folder_status(&self, folders: &[PathBuf]) -> Vec<FolderStatus> {
-        folders.iter().map(status_of).collect()
+        folders
+            .iter()
+            .map(PathBuf::as_path)
+            .map(status_of)
+            .collect()
     }
 
     pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
@@ -219,7 +223,7 @@ impl Tidyfile {
     }
 }
 
-fn status_of(folder: &PathBuf) -> FolderStatus {
+fn status_of(folder: &Path) -> FolderStatus {
     let state = match paths::accept_watched_folder(folder) {
         Ok(_) => "ok",
         Err(PathError::Forbidden) => "forbidden",
@@ -488,7 +492,10 @@ mod tests {
         let ghost = root.path().join("ghost");
 
         assert!(
-            service.simulate(&[], &[ghost.clone()]).unwrap().is_empty(),
+            service
+                .simulate(&[], std::slice::from_ref(&ghost))
+                .unwrap()
+                .is_empty(),
             "a folder that is not there yields no changes instead of an error"
         );
         assert_eq!(service.folder_status(&[ghost])[0].state, "unavailable");
