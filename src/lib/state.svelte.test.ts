@@ -11,6 +11,7 @@ const backend = {
   simulated: 0,
   failNext: null as { code: string; message: string } | null,
   manualRestore: 0,
+  report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 },
 };
 
 function maybeFail(): void {
@@ -40,13 +41,7 @@ vi.mock("./ipc", async (original) => {
       backend.simulated += 1;
       return backend.preview;
     }),
-    organize: vi.fn(async () => ({
-      batch: "b1",
-      applied: 1,
-      skipped: 0,
-      failed: 0,
-      needsManualRestore: 0,
-    })),
+    organize: vi.fn(async () => backend.report),
     undo: vi.fn(async () => ({
       batch: "b1",
       applied: 1,
@@ -101,6 +96,7 @@ beforeEach(() => {
   backend.simulated = 0;
   backend.failNext = null;
   backend.manualRestore = 0;
+  backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 };
 });
 
 describe("startup", () => {
@@ -356,5 +352,42 @@ describe("restoring from the trash", () => {
     await workspace.revert("b1");
 
     expect(workspace.manualRestore).toBe(0);
+  });
+});
+
+describe("what a run reports back", () => {
+  test("the outcome is kept so the interface can show it", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0 };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.run();
+
+    expect(workspace.lastRun?.applied).toBe(3);
+  });
+
+  test("files left waiting for a decision are reported, not swallowed", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask" };
+    backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0 };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.run();
+
+    expect(workspace.lastRun?.skipped).toBe(2);
+  });
+
+  test("editing a rule clears a stale outcome", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    await workspace.run();
+    expect(workspace.lastRun).not.toBeNull();
+
+    workspace.edit({ ...aRule("a", true), name: "renamed" });
+
+    expect(workspace.lastRun).toBeNull();
   });
 });

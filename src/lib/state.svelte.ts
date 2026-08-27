@@ -21,6 +21,7 @@ import {
   type ActivityEntry,
   type Collision,
   type PlannedChange,
+  type BatchReport,
   type FolderStatus,
   type RecordedChange,
   type Rule,
@@ -52,6 +53,7 @@ export class Workspace {
   details = $state<RecordedChange[]>([]);
   folderStates = $state<FolderStatus[]>([]);
   manualRestore = $state(0);
+  lastRun = $state<BatchReport | null>(null);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -134,6 +136,7 @@ export class Workspace {
   edit(edited: Rule): void {
     this.rules = this.rules.map((rule) => (rule.id === edited.id ? edited : rule));
     this.preview = null;
+    this.lastRun = null;
   }
 
   async commit(): Promise<void> {
@@ -212,8 +215,9 @@ export class Workspace {
       return;
     }
     const folders = this.folders;
+    this.lastRun = null;
     await this.attempt(async () => {
-      await organize(this.enabledRules, folders);
+      this.lastRun = await organize(this.enabledRules, folders);
       this.history = await activity();
       this.preview = await simulate(this.enabledRules, folders);
     });

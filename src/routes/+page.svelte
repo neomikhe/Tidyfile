@@ -158,6 +158,24 @@
       <button class="primary" disabled={!workspace.canRun} onclick={() => workspace.run()}>
         Tidy now
       </button>
+
+      {#if workspace.lastRun !== null}
+        <p class="outcome" role="status">
+          {#if workspace.lastRun.applied === 0 && workspace.lastRun.skipped === 0 && workspace.lastRun.failed === 0}
+            Nothing needed tidying.
+          {:else}
+            {workspace.lastRun.applied} file{workspace.lastRun.applied === 1 ? "" : "s"} tidied.
+            {#if workspace.lastRun.skipped > 0}
+              {workspace.lastRun.skipped} left alone because something with that name was already
+              there — decide what to do with {workspace.lastRun.skipped === 1 ? "it" : "them"} in
+              Activity.
+            {/if}
+            {#if workspace.lastRun.failed > 0}
+              {workspace.lastRun.failed} could not be done; Activity has the details.
+            {/if}
+          {/if}
+        </p>
+      {/if}
     </section>
   {:else if activeView === "activity"}
     <section aria-labelledby="activity-heading">
@@ -544,6 +562,14 @@
     align-items: center;
     gap: 0.5rem;
     cursor: pointer;
+  }
+
+  .outcome {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid;
+    border-radius: 0.375rem;
+    font-size: 0.9rem;
   }
 
   .summary {
