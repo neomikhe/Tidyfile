@@ -8,7 +8,7 @@ use crate::executor::Collision;
 use crate::paths::PathError;
 use crate::rules::{Condition, FileFacts, Rule};
 use crate::service::{
-    ActivityEntry, BatchReport, PlannedChange, RecordedChange, ServiceError, Tidyfile,
+    ActivityEntry, BatchReport, FolderStatus, PlannedChange, RecordedChange, ServiceError, Tidyfile,
 };
 use crate::settings::Settings;
 use crate::store::{self, StoreError};
@@ -159,6 +159,20 @@ pub async fn undo(state: State<'_, AppState>, batch: String) -> Result<BatchRepo
 pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange>, IpcError> {
     let service = state.service.clone();
     off_thread(move || with(&service, Tidyfile::interrupted)).await
+}
+
+#[tauri::command]
+pub async fn folder_status(
+    state: State<'_, AppState>,
+    folders: Vec<String>,
+) -> Result<Vec<FolderStatus>, IpcError> {
+    let service = state.service.clone();
+    let paths: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
+    off_thread(move || {
+        let guard = service.lock().map_err(|_| IpcError::unavailable())?;
+        Ok(guard.folder_status(&paths))
+    })
+    .await
 }
 
 #[tauri::command]

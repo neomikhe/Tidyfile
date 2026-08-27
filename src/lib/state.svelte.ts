@@ -16,10 +16,12 @@ import {
   undoOperation,
   operations as operationsIn,
   resolveConflicts,
+  folderStatus,
   watchedFolders,
   type ActivityEntry,
   type Collision,
   type PlannedChange,
+  type FolderStatus,
   type RecordedChange,
   type Rule,
 } from "./ipc";
@@ -48,6 +50,7 @@ export class Workspace {
   onCollision = $state<Collision>("suffix");
   expanded = $state<string | null>(null);
   details = $state<RecordedChange[]>([]);
+  folderStates = $state<FolderStatus[]>([]);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -71,6 +74,7 @@ export class Workspace {
       this.folders = settings.folders;
       this.onCollision = settings.onCollision;
       this.watched = await watchedFolders();
+      this.folderStates = await folderStatus(settings.folders);
     });
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
@@ -153,6 +157,7 @@ export class Workspace {
     this.folders = [...this.folders, picked];
     this.preview = null;
     await this.rememberSettings();
+    await this.refreshFolderStates();
     await this.refreshPreview();
   }
 
@@ -169,6 +174,17 @@ export class Workspace {
   async setCollision(policy: Collision): Promise<void> {
     this.onCollision = policy;
     await this.rememberSettings();
+  }
+
+  stateOf(folder: string): string {
+    return this.folderStates.find((entry) => entry.folder === folder)?.state ?? "ok";
+  }
+
+  private async refreshFolderStates(): Promise<void> {
+    const folders = this.folders;
+    await this.attempt(async () => {
+      this.folderStates = await folderStatus(folders);
+    });
   }
 
   private async rememberSettings(): Promise<void> {

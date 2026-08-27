@@ -278,3 +278,46 @@ fn a_rule_whose_destination_sits_inside_the_watched_folder_settles() {
         "the file was duplicated by moving it onto itself: {landed:?}, report {second:?}"
     );
 }
+
+#[test]
+fn one_unusable_folder_does_not_block_tidying_the_others() {
+    let good = TempDir::new().unwrap();
+    let doomed = TempDir::new().unwrap();
+    let archive = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    put(&good.path().join("invoice.pdf"), "content");
+    let gone = doomed.path().to_path_buf();
+    let folders = vec![gone.clone(), good.path().to_path_buf()];
+    let service = Tidyfile::open(&config.path().join("journal.sqlite")).unwrap();
+    drop(doomed);
+    assert!(!gone.exists(), "the first folder is no longer reachable");
+
+    let report = service.organize(&[invoice_rule(archive.path())], &folders, Collision::Suffix);
+
+    assert!(
+        report.is_ok(),
+        "an unplugged or deleted folder must not stop the rest: {report:?}"
+    );
+    assert!(
+        archive.path().join("2026/invoice.pdf").exists(),
+        "the reachable folder was never tidied"
+    );
+}
+
+#[test]
+fn a_forbidden_folder_is_still_reported_rather_than_quietly_ignored() {
+    let good = TempDir::new().unwrap();
+    let archive = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    put(&good.path().join("invoice.pdf"), "content");
+    let system = PathBuf::from(if cfg!(windows) { r"C:\Windows" } else { "/usr" });
+    let folders = vec![system, good.path().to_path_buf()];
+    let service = Tidyfile::open(&config.path().join("journal.sqlite")).unwrap();
+
+    let report = service.organize(&[invoice_rule(archive.path())], &folders, Collision::Suffix);
+
+    assert!(
+        report.is_err(),
+        "a rule aimed at a system folder is a mistake the user must see, not one to skip"
+    );
+}

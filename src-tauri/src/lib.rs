@@ -35,6 +35,7 @@ pub fn run() -> tauri::Result<()> {
             ipc::undo_operation,
             ipc::resolve_conflicts,
             ipc::check_pattern,
+            ipc::folder_status,
             ipc::operations,
             ipc::start_watching,
             ipc::stop_watching,

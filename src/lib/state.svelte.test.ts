@@ -49,6 +49,9 @@ vi.mock("./ipc", async (original) => {
     startWatching: vi.fn(async () => undefined),
     stopWatching: vi.fn(async () => undefined),
     watchedFolders: vi.fn(async () => backend.settings.watched),
+    folderStatus: vi.fn(async (folders: string[]) =>
+      folders.map((folder) => ({ folder, state: "ok" as const })),
+    ),
   };
 });
 

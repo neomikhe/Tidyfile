@@ -50,6 +50,13 @@ pub struct ActivityEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FolderStatus {
+    pub folder: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchReport {
     pub batch: String,
     pub applied: usize,
@@ -170,6 +177,10 @@ impl Tidyfile {
             .collect())
     }
 
+    pub fn folder_status(&self, folders: &[PathBuf]) -> Vec<FolderStatus> {
+        folders.iter().map(status_of).collect()
+    }
+
     pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
         Ok(self
             .executor
@@ -208,10 +219,26 @@ impl Tidyfile {
     }
 }
 
+fn status_of(folder: &PathBuf) -> FolderStatus {
+    let state = match paths::accept_watched_folder(folder) {
+        Ok(_) => "ok",
+        Err(PathError::Forbidden) => "forbidden",
+        Err(PathError::Unresolvable | PathError::NotAFolder) => "unavailable",
+    };
+    FolderStatus {
+        folder: folder.to_string_lossy().into_owned(),
+        state: state.to_owned(),
+    }
+}
+
 fn files_in(folders: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, ServiceError> {
     let mut found = Vec::new();
     for folder in folders {
-        let root = paths::accept_watched_folder(folder)?;
+        let root = match paths::accept_watched_folder(folder) {
+            Ok(root) => root,
+            Err(PathError::Unresolvable | PathError::NotAFolder) => continue,
+            Err(refused) => return Err(refused.into()),
+        };
         let inside = scan(&root)
             .into_iter()
             .filter(|file| paths::is_within(&root, file))
@@ -454,16 +481,17 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_folder_is_refused() {
+    fn a_missing_folder_is_reported_as_unavailable_rather_than_refused() {
         let root = TempDir::new().unwrap();
         let service = Tidyfile::in_memory().unwrap();
 
-        let outcome = service.simulate(&[], &[root.path().join("ghost")]);
+        let ghost = root.path().join("ghost");
 
-        assert!(matches!(
-            outcome,
-            Err(ServiceError::Folder(PathError::Unresolvable))
-        ));
+        assert!(
+            service.simulate(&[], &[ghost.clone()]).unwrap().is_empty(),
+            "a folder that is not there yields no changes instead of an error"
+        );
+        assert_eq!(service.folder_status(&[ghost])[0].state, "unavailable");
     }
 
     #[test]
@@ -546,21 +574,41 @@ mod tests {
     }
 
     #[test]
-    fn one_bad_folder_stops_the_whole_plan_before_anything_moves() {
+    fn a_forbidden_folder_stops_the_whole_plan_before_anything_moves() {
         let good = TempDir::new().unwrap();
         let out = TempDir::new().unwrap();
         let source = good.path().join("one.pdf");
         write(&source, "a");
         let service = Tidyfile::in_memory().unwrap();
-        let roots = [good.path().to_path_buf(), good.path().join("ghost")];
+        let system = PathBuf::from(if cfg!(windows) { r"C:\Windows" } else { "/usr" });
+        let roots = [good.path().to_path_buf(), system];
 
         let outcome = service.organize(&[pdf_rule(out.path())], &roots, Collision::Suffix);
 
-        assert!(outcome.is_err());
+        assert!(
+            outcome.is_err(),
+            "a rule aimed at a system folder must be shown, never quietly skipped"
+        );
         assert!(
             source.exists(),
             "planning failed, so nothing should have been touched"
         );
+    }
+
+    #[test]
+    fn an_unavailable_folder_lets_the_reachable_ones_through() {
+        let good = TempDir::new().unwrap();
+        let out = TempDir::new().unwrap();
+        write(&good.path().join("one.pdf"), "a");
+        let service = Tidyfile::in_memory().unwrap();
+        let roots = [good.path().to_path_buf(), good.path().join("ghost")];
+
+        let report = service
+            .organize(&[pdf_rule(out.path())], &roots, Collision::Suffix)
+            .unwrap();
+
+        assert_eq!(report.applied, 1);
+        assert!(out.path().join("one.pdf").exists());
     }
 
     #[test]

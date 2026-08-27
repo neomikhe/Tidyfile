@@ -313,6 +313,15 @@
                 />
                 <span class="folder">{folder}</span>
               </label>
+              {#if workspace.stateOf(folder) === "unavailable"}
+                <span class="unreachable" role="status">
+                  Not reachable right now, so it is being left out
+                </span>
+              {:else if workspace.stateOf(folder) === "forbidden"}
+                <span class="unreachable" role="alert">
+                  This folder cannot be watched. Remove it to tidy the others.
+                </span>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -509,6 +518,17 @@
     color: inherit;
     font: inherit;
     font-size: 0.9rem;
+  }
+
+  .unreachable {
+    font-size: 0.85rem;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid;
+    border-radius: 0.25rem;
+  }
+
+  ul.watched li {
+    flex-wrap: wrap;
   }
 
   .switch {

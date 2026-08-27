@@ -161,3 +161,12 @@ export function resolveConflicts(batch: string, keepBoth: boolean): Promise<Batc
 export function checkPattern(kind: "glob" | "regex", pattern: string): Promise<void> {
   return invoke<void>("check_pattern", { kind, pattern });
 }
+
+export interface FolderStatus {
+  folder: string;
+  state: "ok" | "unavailable" | "forbidden";
+}
+
+export function folderStatus(folders: string[]): Promise<FolderStatus[]> {
+  return invoke<FolderStatus[]>("folder_status", { folders });
+}
