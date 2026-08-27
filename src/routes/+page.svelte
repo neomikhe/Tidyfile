@@ -298,18 +298,28 @@
       </p>
 
       <h3>Watch continuously</h3>
-      <label class="switch">
-        <input
-          type="checkbox"
-          checked={workspace.watching}
-          disabled={workspace.folders.length === 0 || workspace.status.kind === "working"}
-          onchange={(event) => workspace.setWatching(event.currentTarget.checked)}
-        />
-        <span>Tidy new files as they arrive</span>
-      </label>
+      {#if workspace.folders.length === 0}
+        <p class="empty">Add a folder first.</p>
+      {:else}
+        <ul class="watched">
+          {#each workspace.folders as folder (folder)}
+            <li>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  checked={workspace.isWatched(folder)}
+                  disabled={workspace.status.kind === "working"}
+                  onchange={(event) => workspace.setWatched(folder, event.currentTarget.checked)}
+                />
+                <span class="folder">{folder}</span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       <p class="note">
-        While this is on, files that appear in the folder are tidied by your enabled rules without
-        asking. Everything still goes through the history, so any batch can be undone.
+        A watched folder is tidied by your enabled rules as files arrive, without asking. Everything
+        still goes through the history, so any batch can be undone.
       </p>
     </section>
   {/if}

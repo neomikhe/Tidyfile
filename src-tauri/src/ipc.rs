@@ -6,13 +6,14 @@ use tauri::{AppHandle, State};
 
 use crate::executor::Collision;
 use crate::paths::PathError;
-use crate::rules::Rule;
+use crate::rules::{Condition, FileFacts, Rule};
 use crate::service::{
     ActivityEntry, BatchReport, PlannedChange, RecordedChange, ServiceError, Tidyfile,
 };
 use crate::settings::Settings;
 use crate::store::{self, StoreError};
 use crate::watch::{self, WatchSession};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +98,6 @@ pub fn start_watching(
         )?);
     }
     let mut running = state.sessions.lock().map_err(|_| IpcError::unavailable())?;
-    halt_all(&mut running);
     *running = started;
     Ok(())
 }
@@ -105,7 +105,7 @@ pub fn start_watching(
 #[tauri::command]
 pub fn stop_watching(state: State<'_, AppState>) -> Result<(), IpcError> {
     let mut running = state.sessions.lock().map_err(|_| IpcError::unavailable())?;
-    halt_all(&mut running);
+    running.clear();
     Ok(())
 }
 
@@ -116,12 +116,6 @@ pub fn watched_folders(state: State<'_, AppState>) -> Result<Vec<String>, IpcErr
         .iter()
         .map(|session| session.folder().to_string_lossy().into_owned())
         .collect())
-}
-
-fn halt_all(running: &mut Vec<WatchSession>) {
-    for session in running.drain(..) {
-        session.halt();
-    }
 }
 
 #[tauri::command]
@@ -165,6 +159,30 @@ pub async fn undo(state: State<'_, AppState>, batch: String) -> Result<BatchRepo
 pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange>, IpcError> {
     let service = state.service.clone();
     off_thread(move || with(&service, Tidyfile::interrupted)).await
+}
+
+#[tauri::command]
+pub async fn check_pattern(kind: String, pattern: String) -> Result<(), IpcError> {
+    off_thread(move || {
+        let outcome = match kind.as_str() {
+            "glob" => Condition::NameMatchesGlob { pattern },
+            _ => Condition::NameMatchesRegex { pattern },
+        }
+        .matches(&nothing_in_particular(), SystemTime::UNIX_EPOCH);
+        outcome
+            .map(|_| ())
+            .map_err(|error| IpcError::new("invalidPattern", &error.to_string()))
+    })
+    .await
+}
+
+fn nothing_in_particular() -> FileFacts {
+    FileFacts {
+        path: PathBuf::from("sample.txt"),
+        root: PathBuf::from(""),
+        size: 0,
+        modified: SystemTime::UNIX_EPOCH,
+    }
 }
 
 #[tauri::command]
@@ -306,5 +324,41 @@ mod tests {
 
         assert!(!error.message.contains('/'));
         assert!(!error.message.contains('\\'));
+    }
+
+    #[test]
+    fn a_valid_glob_passes_the_check() {
+        let condition = Condition::NameMatchesGlob {
+            pattern: "Screenshot*.png".into(),
+        };
+        assert!(
+            condition
+                .matches(&nothing_in_particular(), SystemTime::UNIX_EPOCH)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_invalid_regex_is_caught_by_the_same_compiler_that_runs_it() {
+        let condition = Condition::NameMatchesRegex {
+            pattern: "(unclosed".into(),
+        };
+        assert!(
+            condition
+                .matches(&nothing_in_particular(), SystemTime::UNIX_EPOCH)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_oversized_pattern_is_caught_before_it_is_saved() {
+        let condition = Condition::NameMatchesRegex {
+            pattern: "a".repeat(1_000),
+        };
+        assert!(
+            condition
+                .matches(&nothing_in_particular(), SystemTime::UNIX_EPOCH)
+                .is_err()
+        );
     }
 }

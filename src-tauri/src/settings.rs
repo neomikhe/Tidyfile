@@ -8,7 +8,7 @@ use crate::executor::Collision;
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub folders: Vec<PathBuf>,
-    pub watching: bool,
+    pub watched: Vec<PathBuf>,
     pub on_collision: Collision,
 }
 
@@ -22,7 +22,10 @@ mod tests {
         let fresh = Settings::default();
 
         assert!(fresh.folders.is_empty());
-        assert!(!fresh.watching, "watching must not start on by itself");
+        assert!(
+            fresh.watched.is_empty(),
+            "watching must not start on by itself"
+        );
         assert_eq!(fresh.on_collision, Collision::Suffix);
     }
 
@@ -30,7 +33,7 @@ mod tests {
     fn settings_survive_a_json_round_trip() {
         let chosen = Settings {
             folders: vec![PathBuf::from("/watched")],
-            watching: true,
+            watched: vec![PathBuf::from("/watched")],
             on_collision: Collision::Skip,
         };
 
@@ -45,7 +48,7 @@ mod tests {
         let partial: Settings = serde_json::from_str(r#"{"folders":["/only-this"]}"#).unwrap();
 
         assert_eq!(partial.folders, [PathBuf::from("/only-this")]);
-        assert!(!partial.watching);
+        assert!(partial.watched.is_empty());
         assert_eq!(partial.on_collision, Collision::Suffix);
     }
 }

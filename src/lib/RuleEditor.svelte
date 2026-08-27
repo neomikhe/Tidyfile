@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import type { Action, Condition, Rule } from "./ipc";
+  import { checkPattern, type Action, type Condition, type Rule } from "./ipc";
   import {
     actionLabels,
     actionTypes,
@@ -26,6 +26,24 @@
     onremove: () => void;
     ondone: () => void;
   } = $props();
+
+  let patternProblem = $state<Record<number, string>>({});
+
+  async function verify(index: number, kind: "glob" | "regex", pattern: string): Promise<void> {
+    if (pattern.trim().length === 0) {
+      patternProblem = { ...patternProblem, [index]: "" };
+      return;
+    }
+    try {
+      await checkPattern(kind, pattern);
+      patternProblem = { ...patternProblem, [index]: "" };
+    } catch (error) {
+      const message = typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message: unknown }).message)
+        : "This pattern cannot be used.";
+      patternProblem = { ...patternProblem, [index]: message };
+    }
+  }
 
   function edit(changes: Partial<Rule>): void {
     onchange({ ...rule, ...changes });
@@ -111,12 +129,22 @@
         <input
           placeholder={condition.type === "nameMatchesGlob" ? "Screenshot*.png" : "^IMG_\\d+"}
           value={condition.pattern}
+          aria-invalid={Boolean(patternProblem[index])}
           oninput={(event) =>
             replaceCondition(index, {
               type: condition.type,
               pattern: event.currentTarget.value,
             })}
+          onchange={(event) =>
+            verify(
+              index,
+              condition.type === "nameMatchesGlob" ? "glob" : "regex",
+              event.currentTarget.value,
+            )}
         />
+        {#if patternProblem[index]}
+          <span class="pattern-problem" role="alert">{patternProblem[index]}</span>
+        {/if}
       {:else if condition.type === "largerThan" || condition.type === "smallerThan"}
         <input
           type="number"
@@ -306,6 +334,14 @@
   .folder {
     font-family: ui-monospace, monospace;
     overflow-wrap: anywhere;
+  }
+
+  .pattern-problem {
+    flex: 1 1 100%;
+    font-size: 0.85rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid;
+    border-radius: 0.25rem;
   }
 
   .hint {

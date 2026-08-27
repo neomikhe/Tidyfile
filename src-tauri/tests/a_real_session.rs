@@ -111,7 +111,7 @@ fn a_whole_session_tidies_a_messy_folder_and_puts_it_all_back() {
         &settings_file,
         &Settings {
             folders: vec![downloads.path().to_path_buf()],
-            watching: false,
+            watched: Vec::new(),
             on_collision: Collision::Suffix,
         },
     )

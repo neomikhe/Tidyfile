@@ -28,8 +28,10 @@ impl WatchSession {
     pub fn folder(&self) -> &Path {
         &self.root
     }
+}
 
-    pub fn halt(mut self) {
+impl Drop for WatchSession {
+    fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

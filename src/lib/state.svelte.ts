@@ -43,7 +43,7 @@ export class Workspace {
   preview = $state<PlannedChange[] | null>(null);
   history = $state<ActivityEntry[]>([]);
   status = $state<Status>({ kind: "idle" });
-  watching = $state(false);
+  watched = $state<string[]>([]);
   unfinished = $state<PlannedChange[]>([]);
   onCollision = $state<Collision>("suffix");
   expanded = $state<string | null>(null);
@@ -70,7 +70,7 @@ export class Workspace {
       const settings = await loadSettings();
       this.folders = settings.folders;
       this.onCollision = settings.onCollision;
-      this.watching = (await watchedFolders()).length > 0;
+      this.watched = await watchedFolders();
     });
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
@@ -90,18 +90,21 @@ export class Workspace {
     this.unlisten = null;
   }
 
-  async setWatching(active: boolean): Promise<void> {
-    if (active && this.folders.length === 0) {
-      return;
-    }
-    const folders = this.folders;
+  isWatched(folder: string): boolean {
+    return this.watched.includes(folder);
+  }
+
+  async setWatched(folder: string, active: boolean): Promise<void> {
+    const next = active
+      ? [...this.watched, folder]
+      : this.watched.filter((kept) => kept !== folder);
     await this.attempt(async () => {
-      if (active) {
-        await startWatching(folders);
-      } else {
+      if (next.length === 0) {
         await stopWatching();
+      } else {
+        await startWatching(next);
       }
-      this.watching = active;
+      this.watched = next;
     });
     await this.rememberSettings();
   }
@@ -155,6 +158,9 @@ export class Workspace {
 
   async removeFolder(folder: string): Promise<void> {
     this.folders = this.folders.filter((kept) => kept !== folder);
+    if (this.isWatched(folder)) {
+      await this.setWatched(folder, false);
+    }
     this.preview = null;
     await this.rememberSettings();
     await this.refreshPreview();
@@ -168,7 +174,7 @@ export class Workspace {
   private async rememberSettings(): Promise<void> {
     const snapshot = {
       folders: this.folders,
-      watching: this.watching,
+      watched: this.watched,
       onCollision: this.onCollision,
     };
     await this.attempt(() => saveSettings(snapshot));

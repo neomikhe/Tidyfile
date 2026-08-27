@@ -125,7 +125,7 @@ export type Collision = "suffix" | "skip" | "ask";
 
 export interface Settings {
   folders: string[];
-  watching: boolean;
+  watched: string[];
   onCollision: Collision;
 }
 
@@ -156,4 +156,8 @@ export function undoOperation(id: number): Promise<BatchReport> {
 
 export function resolveConflicts(batch: string, keepBoth: boolean): Promise<BatchReport> {
   return invoke<BatchReport>("resolve_conflicts", { batch, keepBoth });
+}
+
+export function checkPattern(kind: "glob" | "regex", pattern: string): Promise<void> {
+  return invoke<void>("check_pattern", { kind, pattern });
 }
