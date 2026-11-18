@@ -10,6 +10,14 @@ use tidyfile_lib::service::Tidyfile;
 use tidyfile_lib::settings::Settings;
 use tidyfile_lib::store;
 
+// WHY: macOS keeps the system temp folder under /private, where no watched folder is allowed
+fn scratch() -> TempDir {
+    if tidyfile_lib::paths::accept_watched_folder(&std::env::temp_dir()).is_ok() {
+        return TempDir::new().unwrap();
+    }
+    TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
 fn put(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -94,9 +102,9 @@ fn survivors(root: &Path) -> Vec<String> {
 
 #[test]
 fn a_whole_session_tidies_a_messy_folder_and_puts_it_all_back() {
-    let downloads = TempDir::new().unwrap();
-    let archive = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let downloads = scratch();
+    let archive = scratch();
+    let config = scratch();
     messy_downloads(downloads.path());
     let before = survivors(downloads.path());
 
@@ -175,9 +183,9 @@ fn a_whole_session_tidies_a_messy_folder_and_puts_it_all_back() {
 
 #[test]
 fn a_second_pass_over_an_already_tidy_folder_changes_nothing() {
-    let downloads = TempDir::new().unwrap();
-    let archive = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let downloads = scratch();
+    let archive = scratch();
+    let config = scratch();
     put(&downloads.path().join("invoice-march.pdf"), "an invoice");
     let rules = vec![invoice_rule(archive.path())];
     let folders = vec![downloads.path().to_path_buf()];
@@ -204,10 +212,10 @@ fn a_second_pass_over_an_already_tidy_folder_changes_nothing() {
 
 #[test]
 fn two_folders_holding_the_same_name_both_survive_the_move() {
-    let first = TempDir::new().unwrap();
-    let second = TempDir::new().unwrap();
-    let archive = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let first = scratch();
+    let second = scratch();
+    let archive = scratch();
+    let config = scratch();
     put(&first.path().join("invoice.pdf"), "from the first folder");
     put(&second.path().join("invoice.pdf"), "from the second folder");
     let folders = vec![first.path().to_path_buf(), second.path().to_path_buf()];
@@ -234,8 +242,8 @@ fn two_folders_holding_the_same_name_both_survive_the_move() {
 
 #[test]
 fn a_rule_whose_destination_sits_inside_the_watched_folder_settles() {
-    let watched = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let watched = scratch();
+    let config = scratch();
     put(&watched.path().join("invoice.pdf"), "content");
     let inside = watched.path().join("PDFs");
     let rules = vec![Rule {
@@ -281,10 +289,10 @@ fn a_rule_whose_destination_sits_inside_the_watched_folder_settles() {
 
 #[test]
 fn one_unusable_folder_does_not_block_tidying_the_others() {
-    let good = TempDir::new().unwrap();
-    let doomed = TempDir::new().unwrap();
-    let archive = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let good = scratch();
+    let doomed = scratch();
+    let archive = scratch();
+    let config = scratch();
     put(&good.path().join("invoice.pdf"), "content");
     let gone = doomed.path().to_path_buf();
     let folders = vec![gone.clone(), good.path().to_path_buf()];
@@ -306,9 +314,9 @@ fn one_unusable_folder_does_not_block_tidying_the_others() {
 
 #[test]
 fn a_forbidden_folder_is_still_reported_rather_than_quietly_ignored() {
-    let good = TempDir::new().unwrap();
-    let archive = TempDir::new().unwrap();
-    let config = TempDir::new().unwrap();
+    let good = scratch();
+    let archive = scratch();
+    let config = scratch();
     put(&good.path().join("invoice.pdf"), "content");
     let system = PathBuf::from(if cfg!(windows) { r"C:\Windows" } else { "/usr" });
     let folders = vec![system, good.path().to_path_buf()];

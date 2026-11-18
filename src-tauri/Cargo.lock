@@ -3524,6 +3524,7 @@ name = "tidyfile"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dunce",
  "globset",
  "notify",
  "notify-debouncer-full",

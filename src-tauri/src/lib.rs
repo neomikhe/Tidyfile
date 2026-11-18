@@ -7,6 +7,8 @@ pub mod service;
 pub mod settings;
 pub mod store;
 pub mod templates;
+#[cfg(test)]
+mod testing;
 pub mod watch;
 pub mod watcher;
 

@@ -168,15 +168,16 @@ impl Executor {
         if record.state != State::Done {
             return Ok(Outcome::Skipped(SkipReason::NothingToUndo));
         }
-        let outcome = self.undo_one(&format!("{}:undo", record.batch), &record.operation)?;
+        let outcome = self.undo_one(&record)?;
         if matches!(outcome, Outcome::Applied(_) | Outcome::Skipped(_)) {
             self.journal.mark(id, State::Undone, None)?;
         }
         Ok(outcome)
     }
 
-    fn undo_one(&self, batch: &str, operation: &Operation) -> Result<Outcome, ExecutorError> {
-        match operation {
+    fn undo_one(&self, record: &RecordedOperation) -> Result<Outcome, ExecutorError> {
+        let batch = &format!("{}:undo", record.batch);
+        match &record.operation {
             Operation::Move { from, to } => self.apply_one(
                 batch,
                 &Operation::Move {
@@ -190,7 +191,7 @@ impl Executor {
                 &Operation::Trash { from: to.clone() },
                 Collision::Suffix,
             ),
-            Operation::Trash { from } => Ok(restore::from_trash(from)),
+            Operation::Trash { from } => Ok(restore::from_trash(from, record.recorded_at)),
         }
     }
 }
@@ -347,17 +348,23 @@ fn candidate_name(
 mod restore {
     use super::{Outcome, SkipReason};
     use crate::journal::Operation;
-    use std::path::Path;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use trash::TrashItem;
 
-    pub fn from_trash(original: &Path) -> Outcome {
+    #[cfg(windows)]
+    const ACCEPTED_DRIFT: (i64, i64) = (2, 300);
+    // WHY: freedesktop stores the deletion time as local time without a zone, so it drifts by the UTC offset
+    #[cfg(not(windows))]
+    const ACCEPTED_DRIFT: (i64, i64) = (93_600, 93_600);
+
+    pub fn from_trash(original: &Path, recorded_at: i64) -> Outcome {
         let items = match trash::os_limited::list() {
             Ok(items) => items,
             Err(error) => return Outcome::Failed(error.to_string()),
         };
-        let Some(item) = items
-            .into_iter()
-            .find(|item| item.original_path() == original)
-        else {
+        let wanted = as_the_trash_records_it(original);
+        let Some(item) = the_one_trashed(items, &wanted, recorded_at) else {
             return Outcome::Skipped(SkipReason::NotFoundInTrash);
         };
         match trash::os_limited::restore_all([item]) {
@@ -365,6 +372,173 @@ mod restore {
                 from: original.to_path_buf(),
             }),
             Err(error) => Outcome::Failed(error.to_string()),
+        }
+    }
+
+    fn the_one_trashed(
+        items: Vec<TrashItem>,
+        original: &Path,
+        recorded_at: i64,
+    ) -> Option<TrashItem> {
+        let folder = original.parent()?;
+        let name = original.file_name()?;
+        let mut chosen = items
+            .into_iter()
+            .filter(|item| item.original_parent == folder && is_listed_as(item, name))
+            .filter(|item| is_close_in_time(item, recorded_at))
+            .min_by_key(|item| drift(item, recorded_at).saturating_abs())?;
+        chosen.name = name.to_os_string();
+        Some(chosen)
+    }
+
+    fn drift(item: &TrashItem, recorded_at: i64) -> i64 {
+        item.time_deleted.saturating_sub(recorded_at)
+    }
+
+    fn is_close_in_time(item: &TrashItem, recorded_at: i64) -> bool {
+        let (before, after) = ACCEPTED_DRIFT;
+        (-before..=after).contains(&drift(item, recorded_at))
+    }
+
+    // WHY: with "hide extensions for known file types" on, Windows lists `report.pdf` as `report`
+    #[cfg(windows)]
+    fn is_listed_as(item: &TrashItem, name: &OsStr) -> bool {
+        let stored = Path::new(&item.id).file_name().unwrap_or_default();
+        let stem = Path::new(name).file_stem();
+        extension_of(stored) == extension_of(name)
+            && (item.name == name || stem == Some(item.name.as_os_str()))
+    }
+
+    #[cfg(not(windows))]
+    fn is_listed_as(item: &TrashItem, name: &OsStr) -> bool {
+        item.name == name
+    }
+
+    #[cfg(windows)]
+    fn extension_of(name: &OsStr) -> Option<String> {
+        let (_, extension) = name.to_str()?.rsplit_once('.')?;
+        (!extension.is_empty()).then(|| extension.to_ascii_lowercase())
+    }
+
+    // WHY: the trash keeps `C:\..`; the journal holds `\\?\C:\..`, and tests on CI an 8.3 short name
+    fn as_the_trash_records_it(path: &Path) -> PathBuf {
+        let parent = path.parent().map(|parent| {
+            parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf())
+        });
+        let full = match (parent, path.file_name()) {
+            (Some(parent), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        };
+        dunce::simplified(&full).to_path_buf()
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    mod tests {
+        use super::*;
+        use std::ffi::OsString;
+
+        const RECORDED: i64 = 1_000_000;
+
+        fn trashed(parent: &str, name: &str, at: i64) -> TrashItem {
+            TrashItem {
+                id: OsString::from(format!("/bin/$R{at}-{name}")),
+                name: name.into(),
+                original_parent: PathBuf::from(parent),
+                time_deleted: at,
+            }
+        }
+
+        #[test]
+        fn the_file_this_operation_trashed_wins_over_its_namesakes() {
+            let (before, _) = ACCEPTED_DRIFT;
+            let items = vec![
+                trashed("/w", "setup.exe", RECORDED + 60),
+                trashed("/w", "setup.exe", RECORDED + 1),
+                trashed("/w", "setup.exe", RECORDED - before - 1),
+            ];
+
+            let chosen = the_one_trashed(items, Path::new("/w/setup.exe"), RECORDED).unwrap();
+
+            assert_eq!(chosen.time_deleted, RECORDED + 1);
+        }
+
+        #[test]
+        fn a_namesake_trashed_outside_the_window_is_never_restored() {
+            let (before, after) = ACCEPTED_DRIFT;
+            let items = vec![
+                trashed("/w", "setup.exe", RECORDED - before - 1),
+                trashed("/w", "setup.exe", RECORDED + after + 1),
+            ];
+
+            assert!(the_one_trashed(items, Path::new("/w/setup.exe"), RECORDED).is_none());
+        }
+
+        #[test]
+        fn another_folder_or_another_name_is_not_a_match() {
+            let items = vec![
+                trashed("/elsewhere", "setup.exe", 1_000),
+                trashed("/w", "other.exe", 1_000),
+            ];
+
+            assert!(the_one_trashed(items, Path::new("/w/setup.exe"), 1_000).is_none());
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_name_listed_without_its_extension_matches_and_comes_back_whole() {
+            let mut listed = trashed("/w", "setup", 1_000);
+            listed.id = OsString::from(r"C:\$Recycle.Bin\S-1-5-21\$RAB12CD.exe");
+
+            let chosen = the_one_trashed(vec![listed], Path::new("/w/setup.exe"), 1_000).unwrap();
+
+            assert_eq!(
+                chosen.name, "setup.exe",
+                "restoring as `setup` would drop the extension"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_name_without_extension_from_another_type_is_not_a_match() {
+            let mut listed = trashed("/w", "setup", 1_000);
+            listed.id = OsString::from(r"C:\$Recycle.Bin\S-1-5-21\$RAB12CD.txt");
+
+            assert!(the_one_trashed(vec![listed], Path::new("/w/setup.exe"), 1_000).is_none());
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_double_extension_with_the_last_one_hidden_is_not_a_match() {
+            let mut impostor = trashed("/w", "invoice.pdf", 1_000);
+            impostor.id = OsString::from(r"C:\$Recycle.Bin\S-1-5-21\$RAB12CD.exe");
+
+            assert!(
+                the_one_trashed(vec![impostor], Path::new("/w/invoice.pdf"), 1_000).is_none(),
+                "invoice.pdf.exe must never come back as invoice.pdf"
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_file_without_extension_does_not_take_one_whose_extension_is_hidden() {
+            let mut listed = trashed("/w", "notes", 1_000);
+            listed.id = OsString::from(r"C:\$Recycle.Bin\S-1-5-21\$RAB12CD.txt");
+
+            assert!(the_one_trashed(vec![listed], Path::new("/w/notes"), 1_000).is_none());
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn a_verbatim_journal_path_matches_even_when_its_folder_is_gone() {
+            let journal = Path::new(r"\\?\C:\tidyfile-folder-that-is-gone\a.pdf");
+
+            assert_eq!(
+                as_the_trash_records_it(journal),
+                PathBuf::from(r"C:\tidyfile-folder-that-is-gone\a.pdf")
+            );
         }
     }
 }
@@ -382,7 +556,7 @@ mod restore {
     use super::{Outcome, SkipReason};
     use std::path::Path;
 
-    pub fn from_trash(_original: &Path) -> Outcome {
+    pub fn from_trash(_original: &Path, _recorded_at: i64) -> Outcome {
         Outcome::Skipped(SkipReason::RestoreUnsupported)
     }
 }

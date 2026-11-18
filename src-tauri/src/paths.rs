@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn a_real_folder_resolves_to_an_absolute_path() {
-        let folder = TempDir::new().unwrap();
+        let folder = crate::testing::watchable_folder();
 
         let accepted = accept_watched_folder(folder.path()).unwrap();
 

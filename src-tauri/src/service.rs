@@ -360,7 +360,7 @@ fn next_batch_id() -> String {
 mod tests {
     use super::*;
     use crate::rules::{Action, Combinator, Condition};
-    use tempfile::TempDir;
+    use crate::testing::watchable_folder;
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -387,9 +387,37 @@ mod tests {
     }
 
     #[test]
+    fn a_trashed_file_comes_back_when_its_batch_is_undone() {
+        let root = watchable_folder();
+        let source = root.path().join("old-installer.pdf");
+        write(&source, "the original content");
+        let mut trashing = pdf_rule(Path::new("/unused"));
+        trashing.actions = vec![Action::Trash];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize(&[trashing], &[root.path().to_path_buf()], Collision::Suffix)
+            .unwrap();
+        assert_eq!(report.applied, 1);
+        assert!(!source.exists());
+        let undone = service.undo(&report.batch).unwrap();
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(undone.needs_manual_restore, 1);
+        } else {
+            assert_eq!(undone.applied, 1);
+            assert_eq!(
+                fs::read_to_string(&source).unwrap(),
+                "the original content",
+                "undo did not bring the same file back from the trash"
+            );
+        }
+    }
+
+    #[test]
     fn simulation_reports_what_would_happen_without_touching_anything() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         let source = root.path().join("invoice.pdf");
         write(&source, "content");
         let service = Tidyfile::in_memory().unwrap();
@@ -406,8 +434,8 @@ mod tests {
 
     #[test]
     fn organizing_applies_exactly_what_the_simulation_promised() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         write(&root.path().join("invoice.pdf"), "content");
         write(&root.path().join("notes.txt"), "content");
         let rules = [pdf_rule(out.path())];
@@ -428,8 +456,8 @@ mod tests {
 
     #[test]
     fn organizing_can_be_undone_as_a_batch() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         let source = root.path().join("invoice.pdf");
         write(&source, "content");
         let service = Tidyfile::in_memory().unwrap();
@@ -449,8 +477,8 @@ mod tests {
 
     #[test]
     fn the_scan_reaches_subfolders() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         write(&root.path().join("deep/deeper/invoice.pdf"), "content");
         let service = Tidyfile::in_memory().unwrap();
 
@@ -463,8 +491,8 @@ mod tests {
 
     #[test]
     fn the_scan_ignores_download_temporaries() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         write(&root.path().join("invoice.pdf.crdownload"), "partial");
         write(&root.path().join("~$invoice.pdf"), "lock");
         let service = Tidyfile::in_memory().unwrap();
@@ -491,7 +519,7 @@ mod tests {
 
     #[test]
     fn a_missing_folder_is_reported_as_unavailable_rather_than_refused() {
-        let root = TempDir::new().unwrap();
+        let root = watchable_folder();
         let service = Tidyfile::in_memory().unwrap();
 
         let ghost = root.path().join("ghost");
@@ -516,8 +544,8 @@ mod tests {
 
     #[test]
     fn nothing_matching_produces_an_empty_report() {
-        let root = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
         write(&root.path().join("notes.txt"), "content");
         let service = Tidyfile::in_memory().unwrap();
 
@@ -535,7 +563,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_directory_junction_does_not_take_the_scan_outside() {
-        let root = TempDir::new().unwrap();
+        let root = watchable_folder();
         let watched = root.path().join("watched");
         let outside = root.path().join("outside");
         fs::create_dir_all(&watched).unwrap();
@@ -565,9 +593,9 @@ mod tests {
 
     #[test]
     fn several_folders_are_planned_together_in_one_batch() {
-        let first = TempDir::new().unwrap();
-        let second = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let first = watchable_folder();
+        let second = watchable_folder();
+        let out = watchable_folder();
         write(&first.path().join("one.pdf"), "a");
         write(&second.path().join("two.pdf"), "b");
         let service = Tidyfile::in_memory().unwrap();
@@ -587,8 +615,8 @@ mod tests {
 
     #[test]
     fn a_forbidden_folder_stops_the_whole_plan_before_anything_moves() {
-        let good = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let good = watchable_folder();
+        let out = watchable_folder();
         let source = good.path().join("one.pdf");
         write(&source, "a");
         let service = Tidyfile::in_memory().unwrap();
@@ -609,8 +637,8 @@ mod tests {
 
     #[test]
     fn an_unavailable_folder_lets_the_reachable_ones_through() {
-        let good = TempDir::new().unwrap();
-        let out = TempDir::new().unwrap();
+        let good = watchable_folder();
+        let out = watchable_folder();
         write(&good.path().join("one.pdf"), "a");
         let service = Tidyfile::in_memory().unwrap();
         let roots = [good.path().to_path_buf(), good.path().join("ghost")];
@@ -625,8 +653,8 @@ mod tests {
 
     #[test]
     fn the_counter_runs_across_folders_not_per_folder() {
-        let first = TempDir::new().unwrap();
-        let second = TempDir::new().unwrap();
+        let first = watchable_folder();
+        let second = watchable_folder();
         write(&first.path().join("a.pdf"), "a");
         write(&second.path().join("b.pdf"), "b");
         let mut counted = pdf_rule(Path::new("/out"));
