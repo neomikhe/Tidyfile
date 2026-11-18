@@ -8,7 +8,8 @@ use crate::executor::Collision;
 use crate::paths::PathError;
 use crate::rules::{Condition, FileFacts, Rule};
 use crate::service::{
-    ActivityEntry, BatchReport, FolderStatus, PlannedChange, RecordedChange, ServiceError, Tidyfile,
+    ActivityEntry, BatchReport, FolderStatus, PlannedChange, RecordedChange, ServiceError, Shown,
+    Tidyfile, statuses,
 };
 use crate::settings::Settings;
 use crate::store::{self, StoreError};
@@ -60,6 +61,7 @@ fn code_for(error: &ServiceError) -> &'static str {
         ServiceError::Journal(_) => "historyUnavailable",
         ServiceError::Executor(_) => "executionFailed",
         ServiceError::Watcher(_) => "watchFailed",
+        ServiceError::PlanChanged => "planChanged",
     }
 }
 
@@ -149,13 +151,18 @@ pub async fn organize(
     state: State<'_, AppState>,
     rules: Vec<Rule>,
     folders: Vec<String>,
+    expected: Vec<PlannedChange>,
 ) -> Result<BatchReport, IpcError> {
     let service = state.service.clone();
-    let collision = current_collision(&state.settings_file);
+    let on_collision = current_collision(&state.settings_file);
     off_thread(move || {
         let roots = into_paths(folders);
         with(&service, |tidyfile| {
-            tidyfile.organize(&rules, &roots, collision)
+            let shown = Shown {
+                changes: &expected,
+                on_collision,
+            };
+            tidyfile.organize_as_shown(&rules, &roots, shown)
         })
     })
     .await
@@ -174,17 +181,9 @@ pub async fn interrupted(state: State<'_, AppState>) -> Result<Vec<PlannedChange
 }
 
 #[tauri::command]
-pub async fn folder_status(
-    state: State<'_, AppState>,
-    folders: Vec<String>,
-) -> Result<Vec<FolderStatus>, IpcError> {
-    let service = state.service.clone();
+pub async fn folder_status(folders: Vec<String>) -> Result<Vec<FolderStatus>, IpcError> {
     let paths: Vec<PathBuf> = folders.into_iter().map(PathBuf::from).collect();
-    off_thread(move || {
-        let guard = service.lock().map_err(|_| IpcError::unavailable())?;
-        Ok(guard.folder_status(&paths))
-    })
-    .await
+    off_thread(move || Ok(statuses(&paths))).await
 }
 
 #[tauri::command]

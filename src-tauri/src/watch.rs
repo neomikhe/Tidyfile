@@ -20,14 +20,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub const TIDIED_EVENT: &str = "tidied";
 
 pub struct WatchSession {
-    root: PathBuf,
+    requested: PathBuf,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
+// WHY: the interface matches folders as the user wrote them, not in their resolved verbatim form
 impl WatchSession {
     pub fn folder(&self) -> &Path {
-        &self.root
+        &self.requested
     }
 }
 
@@ -86,7 +87,7 @@ pub fn start(
     });
 
     Ok(WatchSession {
-        root,
+        requested: folder.to_path_buf(),
         stop,
         worker: Some(worker),
     })
@@ -131,6 +132,18 @@ fn worth_announcing(report: &BatchReport) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_watched_folder_is_reported_as_the_user_wrote_it() {
+        let written = Path::new("Downloads/");
+        let session = WatchSession {
+            requested: written.to_path_buf(),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        };
+
+        assert_eq!(session.folder(), written);
+    }
 
     fn report(applied: usize, skipped: usize, failed: usize) -> BatchReport {
         BatchReport {

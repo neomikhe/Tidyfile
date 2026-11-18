@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::executor::{Collision, Executor, Outcome, SkipReason};
 use crate::journal::{Journal, JournalError, Operation};
@@ -27,9 +27,16 @@ pub enum ServiceError {
     Executor(#[from] crate::executor::ExecutorError),
     #[error("the folder could not be watched")]
     Watcher(#[from] crate::watcher::WatcherError),
+    #[error("the folder changed since the preview")]
+    PlanChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Shown<'a> {
+    pub changes: &'a [PlannedChange],
+    pub on_collision: Collision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedChange {
     pub kind: String,
@@ -103,8 +110,34 @@ impl Tidyfile {
         on_collision: Collision,
     ) -> Result<BatchReport, ServiceError> {
         let operations = self.plan_folders(rules, folders)?;
+        self.apply_batch(&operations, on_collision)
+    }
+
+    // WHY: comparing under the same lock that applies leaves no gap for the disk to change unseen
+    pub fn organize_as_shown(
+        &self,
+        rules: &[Rule],
+        folders: &[PathBuf],
+        shown: Shown<'_>,
+    ) -> Result<BatchReport, ServiceError> {
+        let operations = self.plan_folders(rules, folders)?;
+        if !operations
+            .iter()
+            .map(describe)
+            .eq(shown.changes.iter().cloned())
+        {
+            return Err(ServiceError::PlanChanged);
+        }
+        self.apply_batch(&operations, shown.on_collision)
+    }
+
+    fn apply_batch(
+        &self,
+        operations: &[Operation],
+        on_collision: Collision,
+    ) -> Result<BatchReport, ServiceError> {
         let batch = next_batch_id();
-        let outcomes = self.executor.apply(&batch, &operations, on_collision)?;
+        let outcomes = self.executor.apply(&batch, operations, on_collision)?;
         Ok(summarize(batch, &outcomes))
     }
 
@@ -151,9 +184,7 @@ impl Tidyfile {
         if operations.is_empty() {
             return Ok(nothing_happened());
         }
-        let batch = next_batch_id();
-        let outcomes = self.executor.apply(&batch, &operations, on_collision)?;
-        Ok(summarize(batch, &outcomes))
+        self.apply_batch(&operations, on_collision)
     }
 
     pub fn resolve_conflicts(
@@ -178,14 +209,6 @@ impl Tidyfile {
             .iter()
             .map(recorded)
             .collect())
-    }
-
-    pub fn folder_status(&self, folders: &[PathBuf]) -> Vec<FolderStatus> {
-        folders
-            .iter()
-            .map(PathBuf::as_path)
-            .map(status_of)
-            .collect()
     }
 
     pub fn activity(&self, limit: usize) -> Result<Vec<ActivityEntry>, ServiceError> {
@@ -242,6 +265,14 @@ fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).map_or(true, |data| data.is_symlink())
 }
 
+pub fn statuses(folders: &[PathBuf]) -> Vec<FolderStatus> {
+    folders
+        .iter()
+        .map(PathBuf::as_path)
+        .map(status_of)
+        .collect()
+}
+
 fn status_of(folder: &Path) -> FolderStatus {
     let state = match paths::accept_watched_folder(folder) {
         Ok(_) => "ok",
@@ -286,15 +317,23 @@ fn collect(folder: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if fs::symlink_metadata(&path).is_ok_and(|data| data.is_symlink()) {
-            continue;
-        }
-        if path.is_dir() {
-            collect(&path, depth + 1, found);
-        } else if path.is_file() && !is_temporary(&path) {
-            found.push(path);
-        }
+        visit(&entry, depth, found);
+    }
+}
+
+// PERF: the listing already knows each entry's type; asking the disk again cost three opens per file
+fn visit(entry: &fs::DirEntry, depth: usize, found: &mut Vec<PathBuf>) {
+    let Ok(kind) = entry.file_type() else {
+        return;
+    };
+    let path = entry.path();
+    if kind.is_symlink() {
+        return;
+    }
+    if kind.is_dir() {
+        collect(&path, depth + 1, found);
+    } else if kind.is_file() && !is_temporary(&path) {
+        found.push(path);
     }
 }
 
@@ -487,6 +526,59 @@ mod tests {
     }
 
     #[test]
+    fn organizing_as_shown_applies_when_nothing_changed() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("invoice.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+        let shown = service.simulate(&rules, &folders).unwrap();
+
+        let report = service
+            .organize_as_shown(
+                &rules,
+                &folders,
+                Shown {
+                    changes: &shown,
+                    on_collision: Collision::Suffix,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.applied, 1);
+    }
+
+    #[test]
+    fn a_folder_that_changed_since_the_preview_is_left_untouched() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("invoice.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+        let shown = service.simulate(&rules, &folders).unwrap();
+        write(&root.path().join("arrived-later.pdf"), "content");
+
+        let outcome = service.organize_as_shown(
+            &rules,
+            &folders,
+            Shown {
+                changes: &shown,
+                on_collision: Collision::Suffix,
+            },
+        );
+
+        assert!(matches!(outcome, Err(ServiceError::PlanChanged)));
+        assert!(root.path().join("invoice.pdf").exists());
+        assert!(root.path().join("arrived-later.pdf").exists());
+        assert!(
+            service.activity(10).unwrap().is_empty(),
+            "nothing was journaled"
+        );
+    }
+
+    #[test]
     fn simulation_reports_what_would_happen_without_touching_anything() {
         let root = watchable_folder();
         let out = watchable_folder();
@@ -603,7 +695,7 @@ mod tests {
                 .is_empty(),
             "a folder that is not there yields no changes instead of an error"
         );
-        assert_eq!(service.folder_status(&[ghost])[0].state, "unavailable");
+        assert_eq!(statuses(&[ghost])[0].state, "unavailable");
     }
 
     #[test]
@@ -648,9 +740,8 @@ mod tests {
         std::os::unix::fs::symlink(target, link).unwrap();
     }
 
-    #[cfg(windows)]
     #[test]
-    fn a_directory_junction_does_not_take_the_scan_outside() {
+    fn a_linked_folder_does_not_take_the_scan_outside() {
         let root = watchable_folder();
         let watched = root.path().join("watched");
         let outside = root.path().join("outside");
@@ -662,14 +753,14 @@ mod tests {
 
         assert!(
             fs::symlink_metadata(&link).unwrap().is_symlink(),
-            "Rust must report a junction as a symlink, or the scan filter misses it"
+            "Rust must report a junction or symlink as a link, or the scan filter misses it"
         );
 
         let found = scan(&watched);
 
         assert!(
             found.is_empty(),
-            "the scan walked through a junction and left the watched folder: {found:?}"
+            "the scan walked through a link and left the watched folder: {found:?}"
         );
     }
 

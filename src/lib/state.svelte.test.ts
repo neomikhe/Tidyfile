@@ -9,11 +9,15 @@ const backend = {
   unfinished: [] as PlannedChange[],
   saved: 0,
   simulated: 0,
+  organized: 0,
+  settingsSaved: 0,
+  settingsUnreachable: false,
   failNext: null as { code: string; message: string } | null,
   manualRestore: 0,
   notInTrash: 0,
   undoFailed: 0,
   alreadyGone: 0,
+  unreachable: [] as string[],
   report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 },
   gate: null as null | (() => void),
 };
@@ -44,14 +48,23 @@ vi.mock("./ipc", async (original) => {
   const real = await original<typeof import("./ipc")>();
   return {
     ...real,
-    loadRules: vi.fn(async () => backend.rules),
+    loadRules: vi.fn(async () => {
+      maybeFail();
+      return backend.rules;
+    }),
     saveRules: vi.fn(async (rules: Rule[]) => {
       maybeFail();
       backend.saved += 1;
       backend.rules = rules;
     }),
-    loadSettings: vi.fn(async () => backend.settings),
+    loadSettings: vi.fn(async () => {
+      if (backend.settingsUnreachable) {
+        throw { code: "rulesUnreachable", message: "the rule file could not be read or written" };
+      }
+      return backend.settings;
+    }),
     saveSettings: vi.fn(async (settings: Settings) => {
+      backend.settingsSaved += 1;
       backend.settings = settings;
     }),
     simulate: vi.fn(async () => {
@@ -60,7 +73,13 @@ vi.mock("./ipc", async (original) => {
       backend.simulated += 1;
       return backend.preview;
     }),
-    organize: vi.fn(async () => backend.report),
+    organize: vi.fn(async (_rules: Rule[], _folders: string[], expected: PlannedChange[]) => {
+      if (JSON.stringify(expected) !== JSON.stringify(backend.preview)) {
+        throw { code: "planChanged", message: "the folder changed since the preview" };
+      }
+      backend.organized += 1;
+      return backend.report;
+    }),
     undo: vi.fn(async () => {
       maybeFail();
       return {
@@ -90,7 +109,10 @@ vi.mock("./ipc", async (original) => {
     stopWatching: vi.fn(async () => undefined),
     watchedFolders: vi.fn(async () => backend.settings.watched),
     folderStatus: vi.fn(async (folders: string[]) =>
-      folders.map((folder) => ({ folder, state: "ok" as const })),
+      folders.map((folder) => ({
+        folder,
+        state: backend.unreachable.includes(folder) ? ("unavailable" as const) : ("ok" as const),
+      })),
     ),
   };
 });
@@ -120,11 +142,15 @@ beforeEach(() => {
   backend.unfinished = [];
   backend.saved = 0;
   backend.simulated = 0;
+  backend.organized = 0;
+  backend.settingsSaved = 0;
+  backend.settingsUnreachable = false;
   backend.failNext = null;
   backend.manualRestore = 0;
   backend.notInTrash = 0;
   backend.undoFailed = 0;
   backend.alreadyGone = 0;
+  backend.unreachable = [];
   backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
   backend.gate = null;
 });
@@ -143,6 +169,68 @@ describe("startup", () => {
     expect(workspace.onCollision).toBe("skip");
     expect(workspace.unfinished).toHaveLength(1);
     expect(workspace.status.kind).toBe("idle");
+  });
+
+  test("an unreadable rule file still lets the folders and history load", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask" };
+    backend.history = [{ batch: "b1", done: 1, undone: 0, failed: 0, skipped: 0, recordedAt: 1 }];
+    backend.failNext = { code: "rulesMalformed", message: "the rule file is not valid Tidyfile JSON" };
+    const workspace = new Workspace();
+
+    await workspace.initialise();
+
+    expect(workspace.folders).toEqual(["/watched"]);
+    expect(workspace.onCollision).toBe("ask");
+    expect(workspace.history).toHaveLength(1);
+    expect(workspace.loadProblem).toBe("the rule file is not valid Tidyfile JSON");
+  });
+
+  test("a rule file that could not be read is never overwritten, and the warning stays", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.failNext = { code: "rulesUnreachable", message: "the rule file could not be read or written" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.add(aRule("new", true));
+    await workspace.refreshFolderStates();
+
+    expect(backend.saved).toBe(0);
+    expect(workspace.savesBlocked).toBe(true);
+    expect(workspace.loadProblem).toBe("the rule file could not be read or written");
+  });
+
+  test("a malformed rule file can be replaced, since a copy was set aside", async () => {
+    backend.failNext = { code: "rulesMalformed", message: "the rule file is not valid Tidyfile JSON" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.add(aRule("new", true));
+
+    expect(backend.saved).toBe(1);
+    expect(workspace.savesBlocked).toBe(false);
+  });
+
+  test("a settings file that could not be read is never overwritten", async () => {
+    backend.settingsUnreachable = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.addFolder("/new");
+
+    expect(backend.settingsSaved).toBe(0);
+    expect(workspace.savesBlocked).toBe(true);
+  });
+
+  test("a fresh start shows what would change before anything can run", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.preview = [{ kind: "move", source: "/watched/a.pdf", destination: "/out/a.pdf" }];
+    const workspace = new Workspace();
+
+    await workspace.initialise();
+
+    expect(workspace.preview).toHaveLength(1);
+    expect(backend.simulated).toBe(1);
   });
 });
 
@@ -171,6 +259,17 @@ describe("running", () => {
     await workspace.initialise();
 
     expect(workspace.canRun).toBe(true);
+  });
+
+  test("tidying is not offered while the preview is stale", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    workspace.edit({ ...aRule("a", true), name: "renamed" });
+
+    expect(workspace.canRun).toBe(false);
   });
 
   test("only enabled rules are sent to the backend", async () => {
@@ -349,6 +448,20 @@ describe("watching", () => {
   });
 });
 
+describe("folder status", () => {
+  test("checking again notices a folder that went away while the app was open", async () => {
+    backend.settings = { folders: ["/usb"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    expect(workspace.stateOf("/usb")).toBe("ok");
+
+    backend.unreachable = ["/usb"];
+    await workspace.refreshFolderStates();
+
+    expect(workspace.stateOf("/usb")).toBe("unavailable");
+  });
+});
+
 describe("collision policy", () => {
   test("choosing a policy persists it", async () => {
     const workspace = new Workspace();
@@ -500,6 +613,38 @@ describe("what a run reports back", () => {
     workspace.edit({ ...aRule("a", true), name: "renamed" });
 
     expect(workspace.lastRun).toBeNull();
+  });
+});
+
+describe("the preview is what runs", () => {
+  test("a folder that changed since the preview is shown again instead of tidied", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const first = { kind: "move" as const, source: "/watched/a.pdf", destination: "/out/a.pdf" };
+    backend.preview = [first];
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    backend.preview = [first, { kind: "move", source: "/watched/b.pdf", destination: "/out/b.pdf" }];
+    await workspace.run();
+
+    expect(backend.organized).toBe(0);
+    expect(workspace.preview).toHaveLength(2);
+    expect(workspace.previewChanged).toBe(true);
+  });
+
+  test("a second press runs what is now on screen", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    backend.preview = [{ kind: "trash", source: "/watched/new.pdf", destination: null }];
+    await workspace.run();
+
+    await workspace.run();
+
+    expect(backend.organized).toBe(1);
+    expect(workspace.previewChanged).toBe(false);
   });
 });
 

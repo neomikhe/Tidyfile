@@ -33,6 +33,12 @@ function flip(rule: Rule): Rule {
   return { ...rule, enabled: !rule.enabled };
 }
 
+function isPlanChanged(problem: unknown): boolean {
+  return isIpcError(problem) && problem.code === "planChanged";
+}
+
+type StoredFile = "rules" | "settings";
+
 function describe(error: unknown): string {
   if (isIpcError(error)) {
     return error.message;
@@ -66,6 +72,9 @@ export class Workspace {
   couldNotPutBack = $state(0);
   alreadyGone = $state(0);
   lastRun = $state<BatchReport | null>(null);
+  previewChanged = $state(false);
+  loadProblem = $state<string | null>(null);
+  private unreadable = $state<StoredFile[]>([]);
   private unlisten: UnlistenFn | null = null;
 
   get enabledRules(): Rule[] {
@@ -76,24 +85,59 @@ export class Workspace {
     return (
       this.folders.length > 0 &&
       this.enabledRules.length > 0 &&
+      this.preview !== null &&
       this.status.kind !== "working"
     );
   }
 
   async initialise(): Promise<void> {
-    await this.attempt(async () => {
-      this.rules = await loadRules();
-      this.history = await activity();
-      this.unfinished = await interrupted();
-      const settings = await loadSettings();
-      this.folders = settings.folders;
-      this.onCollision = settings.onCollision;
-      this.watched = await watchedFolders();
-      this.folderStates = await folderStatus(settings.folders);
-    });
+    await this.attempt(() => this.loadEverything());
+    await this.refreshPreview();
     this.unlisten = await listen("tidied", () => {
       void this.afterAutomaticTidy();
     });
+  }
+
+  private async loadEverything(): Promise<void> {
+    const problems: unknown[] = [];
+    await this.settle(problems, "rules", async () => {
+      this.rules = await loadRules();
+    });
+    await this.settle(problems, "settings", () => this.applySettings());
+    await this.settle(problems, null, async () => {
+      this.history = await activity();
+      this.unfinished = await interrupted();
+    });
+    await this.settle(problems, null, async () => {
+      this.watched = await watchedFolders();
+    });
+    if (problems.length > 0) {
+      this.loadProblem = describe(problems[0]);
+      throw problems[0];
+    }
+  }
+
+  private async applySettings(): Promise<void> {
+    const settings = await loadSettings();
+    this.folders = settings.folders;
+    this.onCollision = settings.onCollision;
+    this.folderStates = await folderStatus(settings.folders);
+  }
+
+  // WHY: a file that could not be read has no copy set aside, so saving would destroy it
+  private async settle(problems: unknown[], file: StoredFile | null, load: () => Promise<void>): Promise<void> {
+    try {
+      await load();
+    } catch (problem) {
+      problems.push(problem);
+      if (file !== null && isIpcError(problem) && problem.code === "rulesUnreachable") {
+        this.unreadable = [...this.unreadable, file];
+      }
+    }
+  }
+
+  get savesBlocked(): boolean {
+    return this.unreadable.length > 0;
   }
 
   async acknowledgeUnfinished(): Promise<void> {
@@ -149,9 +193,13 @@ export class Workspace {
     this.rules = this.rules.map((rule) => (rule.id === edited.id ? edited : rule));
     this.preview = null;
     this.lastRun = null;
+    this.previewChanged = false;
   }
 
   async commit(): Promise<void> {
+    if (this.unreadable.includes("rules")) {
+      return;
+    }
     await this.attempt(() => saveRules(this.rules));
     await this.refreshPreview();
   }
@@ -161,6 +209,9 @@ export class Workspace {
   }
 
   private async replace(rules: Rule[]): Promise<void> {
+    if (this.unreadable.includes("rules")) {
+      return;
+    }
     this.rules = rules;
     await this.attempt(() => saveRules(rules));
     await this.refreshPreview();
@@ -196,7 +247,7 @@ export class Workspace {
     return this.folderStates.find((entry) => entry.folder === folder)?.state ?? "ok";
   }
 
-  private async refreshFolderStates(): Promise<void> {
+  async refreshFolderStates(): Promise<void> {
     const folders = this.folders;
     await this.attempt(async () => {
       this.folderStates = await folderStatus(folders);
@@ -204,6 +255,9 @@ export class Workspace {
   }
 
   private async rememberSettings(): Promise<void> {
+    if (this.unreadable.includes("settings")) {
+      return;
+    }
     const snapshot = {
       folders: this.folders,
       watched: this.watched,
@@ -219,20 +273,39 @@ export class Workspace {
     const folders = this.folders;
     await this.attempt(async () => {
       this.preview = await simulate(this.enabledRules, folders);
+      this.previewChanged = false;
     });
   }
 
   async run(): Promise<void> {
-    if (this.folders.length === 0) {
+    const shown = this.preview;
+    if (shown === null || this.folders.length === 0) {
       return;
     }
+    const rules = this.enabledRules;
     const folders = this.folders;
     this.lastRun = null;
+    this.previewChanged = false;
     await this.attempt(async () => {
-      this.lastRun = await organize(this.enabledRules, folders);
-      this.history = await activity();
+      try {
+        this.previewChanged = !(await this.tidyAsShown(rules, folders, shown));
+      } finally {
+        this.history = await activity();
+      }
       this.preview = await simulate(this.enabledRules, folders);
     });
+  }
+
+  private async tidyAsShown(rules: Rule[], folders: string[], shown: PlannedChange[]): Promise<boolean> {
+    try {
+      this.lastRun = await organize(rules, folders, shown);
+      return true;
+    } catch (problem) {
+      if (isPlanChanged(problem)) {
+        return false;
+      }
+      throw problem;
+    }
   }
 
   async expand(batch: string): Promise<void> {

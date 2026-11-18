@@ -4,6 +4,7 @@
   import { Workspace } from "#lib/state.svelte.ts";
   import RuleEditor from "#lib/RuleEditor.svelte";
   import { blankRule, isIncomplete } from "#lib/factories.ts";
+  import type { ActivityEntry } from "#lib/ipc.ts";
 
   type View = "rules" | "activity" | "settings";
 
@@ -16,6 +17,27 @@
   const workspace = new Workspace();
   const them = (count: number): string => (count === 1 ? "it" : "them");
   let activeView = $state<View>("rules");
+
+  function counts(entry: ActivityEntry): string {
+    return [
+      `${entry.done} applied`,
+      entry.skipped > 0 ? `${entry.skipped} left alone` : "",
+      entry.failed > 0 ? `${entry.failed} failed` : "",
+      entry.undone > 0 ? `${entry.undone} undone` : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  function show(view: View): void {
+    activeView = view;
+    if (view === "settings") {
+      void workspace.refreshFolderStates();
+    }
+    if (view === "rules" && workspace.preview === null) {
+      void workspace.refreshPreview();
+    }
+  }
   let editingId = $state<string | null>(null);
 
   onMount(() => {
@@ -59,7 +81,7 @@
         <button
           class:active={activeView === view.id}
           aria-current={activeView === view.id ? "page" : undefined}
-          onclick={() => (activeView = view.id)}
+          onclick={() => show(view.id)}
         >
           {view.label}
         </button>
@@ -67,7 +89,16 @@
     </nav>
   </header>
 
-  {#if workspace.status.kind === "problem"}
+  {#if workspace.loadProblem !== null}
+    <p class="problem" role="alert">
+      {workspace.loadProblem}.
+      {#if workspace.savesBlocked}
+        Tidyfile will not overwrite that file while it cannot read it. Check it, then open Tidyfile again.
+      {/if}
+    </p>
+  {/if}
+
+  {#if workspace.status.kind === "problem" && workspace.status.message !== workspace.loadProblem}
     <p class="problem" role="alert">{workspace.status.message}</p>
   {/if}
 
@@ -134,7 +165,12 @@
       {#if workspace.folders.length === 0}
         <p class="empty">Choose a folder in Settings to see what would change.</p>
       {:else if workspace.preview === null}
-        <p class="empty">Nothing simulated yet.</p>
+        <p class="empty">
+          Nothing simulated yet.
+          <button disabled={workspace.status.kind === "working"} onclick={() => workspace.refreshPreview()}>
+            Check again
+          </button>
+        </p>
       {:else if workspace.preview.length === 0}
         <p class="empty">No file in this folder matches an enabled rule.</p>
       {:else}
@@ -143,7 +179,7 @@
           Nothing has been touched yet.
         </p>
         <ul class="preview">
-          {#each workspace.preview as change (change.source)}
+          {#each workspace.preview as change, index (index)}
             <li>
               <span class="kind {change.kind}">{change.kind}</span>
               <span class="from">{fileName(change.source)}</span>
@@ -159,6 +195,13 @@
       <button class="primary" disabled={!workspace.canRun} onclick={() => workspace.run()}>
         Tidy now
       </button>
+
+      {#if workspace.previewChanged}
+        <p class="outcome" role="status">
+          The folder changed since this preview. Nothing was touched: check the updated list above,
+          then press Tidy now again.
+        </p>
+      {/if}
 
       {#if workspace.lastRun !== null}
         <p class="outcome" role="status">
@@ -249,12 +292,7 @@
             <li class="batch">
               <div class="summary-row">
                 <span class="when">{moment(entry.recordedAt)}</span>
-                <span class="counts">
-                  {entry.done} applied
-                  {#if entry.skipped > 0}, {entry.skipped} left alone{/if}
-                  {#if entry.failed > 0}, {entry.failed} failed{/if}
-                  {#if entry.undone > 0}, {entry.undone} undone{/if}
-                </span>
+                <span class="counts">{counts(entry)}</span>
                 <button
                   aria-expanded={workspace.expanded === entry.batch}
                   onclick={() => workspace.expand(entry.batch)}
@@ -386,6 +424,18 @@
 </main>
 
 <style>
+  :global(#svelte-announcer) {
+    position: absolute;
+    left: 0;
+    top: 0;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    overflow: hidden;
+    white-space: nowrap;
+    width: 1px;
+    height: 1px;
+  }
+
   main {
     font-family: system-ui, sans-serif;
     max-width: 52rem;

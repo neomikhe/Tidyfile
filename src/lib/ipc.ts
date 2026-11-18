@@ -56,6 +56,7 @@ export type ErrorCode =
   | "rulesUnreachable"
   | "rulesMalformed"
   | "watchFailed"
+  | "planChanged"
   | "unavailable";
 
 export interface IpcError {
@@ -75,8 +76,8 @@ export function simulate(rules: Rule[], folders: string[]): Promise<PlannedChang
   return invoke<PlannedChange[]>("simulate", { rules, folders });
 }
 
-export function organize(rules: Rule[], folders: string[]): Promise<BatchReport> {
-  return invoke<BatchReport>("organize", { rules, folders });
+export function organize(rules: Rule[], folders: string[], expected: PlannedChange[]): Promise<BatchReport> {
+  return invoke<BatchReport>("organize", { rules, folders, expected });
 }
 
 export function undo(batch: string): Promise<BatchReport> {

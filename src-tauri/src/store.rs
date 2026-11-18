@@ -18,7 +18,9 @@ pub fn load<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StoreError>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
         Err(error) => return Err(StoreError::Unreachable(error)),
     };
-    serde_json::from_str(&contents).map_err(|problem| {
+    // WHY: Windows editors such as older Notepad and PowerShell 5 start UTF-8 files with a BOM
+    let json = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+    serde_json::from_str(json).map_err(|problem| {
         set_aside(path, &contents);
         StoreError::Malformed(problem)
     })
@@ -68,6 +70,18 @@ mod tests {
                 rename: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_file_saved_with_a_byte_order_mark_still_loads() {
+        let folder = TempDir::new().unwrap();
+        let path = folder.path().join("rules.json");
+        save(&path, &[sample()]).unwrap();
+        let plain = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("\u{feff}{plain}")).unwrap();
+
+        assert_eq!(load::<Vec<Rule>>(&path).unwrap(), [sample()]);
+        assert!(!folder.path().join("rules.json.broken").exists());
     }
 
     #[test]
