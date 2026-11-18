@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { Workspace } from "$lib/state.svelte";
-  import RuleEditor from "$lib/RuleEditor.svelte";
-  import { blankRule, isIncomplete } from "$lib/factories";
+  import { Workspace } from "#lib/state.svelte.ts";
+  import RuleEditor from "#lib/RuleEditor.svelte";
+  import { blankRule, isIncomplete } from "#lib/factories.ts";
 
   type View = "rules" | "activity" | "settings";
 
