@@ -1,5 +1,7 @@
 # Tidyfile
 
+**English** · [Español](README.es.md)
+
 A free, open-source, cross-platform file organizer with a graphical interface.
 
 Define visual rules — *"if it's a PDF and the name contains 'invoice', move it to Documents/Invoices/2026 and rename it with the date"* — and Tidyfile watches your folders and keeps them tidy on its own.

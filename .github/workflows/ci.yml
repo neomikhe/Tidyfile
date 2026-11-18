@@ -21,10 +21,10 @@ jobs:
     name: Frontend
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
@@ -42,7 +42,7 @@ jobs:
         os: [ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -59,15 +59,16 @@ jobs:
             libssl-dev \
             build-essential
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
@@ -89,7 +90,7 @@ jobs:
         run: |
           linked=$(cargo tree -e normal --prefix none --no-dedupe \
             | awk '{print $1}' | sort -u \
-            | grep -xE 'reqwest|hyper|ureq|curl|attohttpc|isahc|surf|tungstenite' || true)
+            | grep -xE 'reqwest|hyper|h2|ureq|curl|attohttpc|isahc|surf|tungstenite|minreq|rustls|native-tls|openssl|openssl-sys' || true)
           if [ -n "$linked" ]; then
             echo "::error::Network crates linked into the binary: $linked"
             echo "Tidyfile promises zero network access. See DOCUMENTATION.md invariant I7."

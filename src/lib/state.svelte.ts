@@ -40,6 +40,15 @@ function describe(error: unknown): string {
   return "Something went wrong. Please try again.";
 }
 
+type UndoNotices = Pick<BatchReport, "needsManualRestore" | "notInTrash" | "failed" | "alreadyGone">;
+
+const NOTHING_TO_REPORT: UndoNotices = {
+  needsManualRestore: 0,
+  notInTrash: 0,
+  failed: 0,
+  alreadyGone: 0,
+};
+
 export class Workspace {
   rules = $state<Rule[]>([]);
   folders = $state<string[]>([]);
@@ -53,6 +62,9 @@ export class Workspace {
   details = $state<RecordedChange[]>([]);
   folderStates = $state<FolderStatus[]>([]);
   manualRestore = $state(0);
+  notInTrash = $state(0);
+  couldNotPutBack = $state(0);
+  alreadyGone = $state(0);
   lastRun = $state<BatchReport | null>(null);
   private unlisten: UnlistenFn | null = null;
 
@@ -248,7 +260,8 @@ export class Workspace {
 
   async revertOne(id: number): Promise<void> {
     await this.attempt(async () => {
-      this.manualRestore = (await undoOperation(id)).needsManualRestore;
+      this.noteUndo(NOTHING_TO_REPORT);
+      this.noteUndo(await undoOperation(id));
       this.history = await activity();
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);
@@ -261,7 +274,8 @@ export class Workspace {
 
   async revert(batch: string): Promise<void> {
     await this.attempt(async () => {
-      this.manualRestore = (await undo(batch)).needsManualRestore;
+      this.noteUndo(NOTHING_TO_REPORT);
+      this.noteUndo(await undo(batch));
       this.history = await activity();
       if (this.expanded !== null) {
         this.details = await operationsIn(this.expanded);
@@ -270,6 +284,13 @@ export class Workspace {
         this.preview = await simulate(this.enabledRules, this.folders);
       }
     });
+  }
+
+  private noteUndo(report: UndoNotices): void {
+    this.manualRestore = report.needsManualRestore;
+    this.notInTrash = report.notInTrash;
+    this.couldNotPutBack = report.failed;
+    this.alreadyGone = report.alreadyGone;
   }
 
   private inFlight = 0;

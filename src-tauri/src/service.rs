@@ -63,6 +63,8 @@ pub struct BatchReport {
     pub skipped: usize,
     pub failed: usize,
     pub needs_manual_restore: usize,
+    pub not_in_trash: usize,
+    pub already_gone: usize,
 }
 
 pub struct Tidyfile {
@@ -135,7 +137,7 @@ impl Tidyfile {
         file: &Path,
         on_collision: Collision,
     ) -> Result<BatchReport, ServiceError> {
-        if !paths::is_within(root, file) {
+        if !is_really_inside(root, file) {
             return Ok(nothing_happened());
         }
         let Ok(facts) = crate::rules::FileFacts::gather(file, root) else {
@@ -222,6 +224,22 @@ impl Tidyfile {
         }
         Ok(operations)
     }
+}
+
+// WHY: a watcher event can name a file through a link that leads out of the watched folder
+fn is_really_inside(root: &Path, file: &Path) -> bool {
+    if is_link(root) || is_link(file) {
+        return false;
+    }
+    let real_parent = file.parent().and_then(|parent| parent.canonicalize().ok());
+    match (real_parent, root.canonicalize()) {
+        (Some(parent), Ok(root)) => parent.starts_with(root),
+        _ => false,
+    }
+}
+
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).map_or(true, |data| data.is_symlink())
 }
 
 fn status_of(folder: &Path) -> FolderStatus {
@@ -329,6 +347,12 @@ fn summarize(batch: String, outcomes: &[Outcome]) -> BatchReport {
         needs_manual_restore: count(outcomes, |outcome| {
             matches!(outcome, Outcome::Skipped(SkipReason::RestoreUnsupported))
         }),
+        not_in_trash: count(outcomes, |outcome| {
+            matches!(outcome, Outcome::Skipped(SkipReason::NotFoundInTrash))
+        }),
+        already_gone: count(outcomes, |outcome| {
+            matches!(outcome, Outcome::Skipped(SkipReason::SourceVanished))
+        }),
     }
 }
 
@@ -343,6 +367,8 @@ fn nothing_happened() -> BatchReport {
         skipped: 0,
         failed: 0,
         needs_manual_restore: 0,
+        not_in_trash: 0,
+        already_gone: 0,
     }
 }
 
@@ -412,6 +438,52 @@ mod tests {
                 "undo did not bring the same file back from the trash"
             );
         }
+    }
+
+    #[test]
+    fn a_file_no_longer_in_the_trash_is_counted_so_it_can_be_announced() {
+        let outcomes = [
+            Outcome::Skipped(SkipReason::NotFoundInTrash),
+            Outcome::Skipped(SkipReason::NothingToUndo),
+            Outcome::Skipped(SkipReason::SourceVanished),
+            Outcome::Failed("a file with that name is already there".into()),
+        ];
+
+        let report = summarize("b1".into(), &outcomes);
+
+        assert_eq!(
+            (
+                report.not_in_trash,
+                report.already_gone,
+                report.skipped,
+                report.failed
+            ),
+            (1, 1, 3, 1)
+        );
+    }
+
+    #[test]
+    fn undoing_a_move_whose_file_was_deleted_since_reports_it_as_gone() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("invoice.pdf"), "content");
+        let service = Tidyfile::in_memory().unwrap();
+        let report = service
+            .organize(
+                &[pdf_rule(out.path())],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+        fs::rename(
+            out.path().join("invoice.pdf"),
+            out.path().join("renamed-by-the-user.pdf"),
+        )
+        .unwrap();
+
+        let undone = service.undo(&report.batch).unwrap();
+
+        assert_eq!((undone.already_gone, undone.applied), (1, 0));
     }
 
     #[test]
@@ -561,6 +633,22 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn link_folder(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "could not create the junction");
+    }
+
+    #[cfg(unix)]
+    fn link_folder(link: &Path, target: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_directory_junction_does_not_take_the_scan_outside() {
         let root = watchable_folder();
@@ -570,13 +658,7 @@ mod tests {
         write(&outside.join("secret.pdf"), "outside the watched folder");
 
         let link = watched.join("escape");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&outside)
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "could not create the junction");
+        link_folder(&link, &outside);
 
         assert!(
             fs::symlink_metadata(&link).unwrap().is_symlink(),
@@ -589,6 +671,78 @@ mod tests {
             found.is_empty(),
             "the scan walked through a junction and left the watched folder: {found:?}"
         );
+    }
+
+    #[test]
+    fn a_watched_file_that_is_really_inside_is_tidied() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        let file = root.path().join("invoice.pdf");
+        write(&file, "content");
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize_file(
+                &[pdf_rule(out.path())],
+                root.path(),
+                &file,
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(report.applied, 1);
+        assert!(out.path().join("invoice.pdf").exists());
+    }
+
+    #[test]
+    fn a_watcher_event_through_a_link_does_not_reach_outside() {
+        let base = watchable_folder();
+        let out = watchable_folder();
+        let watched = base.path().join("watched");
+        let outside = base.path().join("outside");
+        fs::create_dir_all(&watched).unwrap();
+        write(&outside.join("secret.pdf"), "outside the watched folder");
+        link_folder(&watched.join("escape"), &outside);
+        let through_link = watched.join("escape").join("secret.pdf");
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize_file(
+                &[pdf_rule(out.path())],
+                &watched,
+                &through_link,
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(report.applied, 0);
+        assert!(
+            outside.join("secret.pdf").exists(),
+            "the file outside was touched"
+        );
+    }
+
+    #[test]
+    fn a_watched_folder_swapped_for_a_link_is_not_followed() {
+        let base = watchable_folder();
+        let out = watchable_folder();
+        let elsewhere = base.path().join("elsewhere");
+        write(&elsewhere.join("invoice.pdf"), "not in the watched folder");
+        let swapped = base.path().join("Downloads");
+        link_folder(&swapped, &elsewhere);
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize_file(
+                &[pdf_rule(out.path())],
+                &swapped,
+                &swapped.join("invoice.pdf"),
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(report.applied, 0);
+        assert!(elsewhere.join("invoice.pdf").exists());
     }
 
     #[test]

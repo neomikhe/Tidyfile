@@ -11,7 +11,10 @@ const backend = {
   simulated: 0,
   failNext: null as { code: string; message: string } | null,
   manualRestore: 0,
-  report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 },
+  notInTrash: 0,
+  undoFailed: 0,
+  alreadyGone: 0,
+  report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 },
   gate: null as null | (() => void),
 };
 
@@ -58,19 +61,26 @@ vi.mock("./ipc", async (original) => {
       return backend.preview;
     }),
     organize: vi.fn(async () => backend.report),
-    undo: vi.fn(async () => ({
+    undo: vi.fn(async () => {
+      maybeFail();
+      return {
       batch: "b1",
       applied: 1,
       skipped: 0,
-      failed: 0,
+      failed: backend.undoFailed,
       needsManualRestore: backend.manualRestore,
-    })),
+      notInTrash: backend.notInTrash,
+      alreadyGone: backend.alreadyGone,
+      };
+    }),
     undoOperation: vi.fn(async () => ({
       batch: "b1",
-      applied: 1,
-      skipped: 0,
-      failed: 0,
+      applied: 0,
+      skipped: backend.notInTrash,
+      failed: backend.undoFailed,
       needsManualRestore: 0,
+      notInTrash: backend.notInTrash,
+      alreadyGone: backend.alreadyGone,
     })),
     operations: vi.fn(async () => []),
     activity: vi.fn(async () => backend.history),
@@ -112,7 +122,10 @@ beforeEach(() => {
   backend.simulated = 0;
   backend.failNext = null;
   backend.manualRestore = 0;
-  backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0 };
+  backend.notInTrash = 0;
+  backend.undoFailed = 0;
+  backend.alreadyGone = 0;
+  backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
   backend.gate = null;
 });
 
@@ -370,12 +383,93 @@ describe("restoring from the trash", () => {
 
     expect(workspace.manualRestore).toBe(0);
   });
+
+  test("a file no longer in the trash is reported, not swallowed", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.notInTrash = 1;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect(workspace.notInTrash).toBe(1);
+  });
+
+  test("a file that could not be put back is reported", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.undoFailed = 1;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect(workspace.couldNotPutBack).toBe(1);
+  });
+
+  test("a later clean undo clears the earlier notices", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.notInTrash = 1;
+    backend.undoFailed = 1;
+    const workspace = new Workspace();
+    await workspace.initialise();
+    await workspace.revert("b1");
+
+    backend.notInTrash = 0;
+    backend.undoFailed = 0;
+    await workspace.revert("b1");
+
+    expect([workspace.notInTrash, workspace.couldNotPutBack]).toEqual([0, 0]);
+  });
+
+  test("a file moved or deleted since is reported, not swallowed", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.alreadyGone = 2;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect(workspace.alreadyGone).toBe(2);
+  });
+
+  test("undoing a single file reports the same notices", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.notInTrash = 1;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revertOne(7);
+
+    expect(workspace.notInTrash).toBe(1);
+  });
+
+  test("an undo that fails outright does not leave the previous notices behind", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.notInTrash = 1;
+    backend.undoFailed = 1;
+    backend.manualRestore = 1;
+    backend.alreadyGone = 1;
+    const workspace = new Workspace();
+    await workspace.initialise();
+    await workspace.revert("b1");
+
+    backend.failNext = { code: "journal", message: "the history could not be reached" };
+    await workspace.revert("b1");
+
+    expect([
+      workspace.manualRestore,
+      workspace.notInTrash,
+      workspace.couldNotPutBack,
+      workspace.alreadyGone,
+    ]).toEqual([0, 0, 0, 0]);
+    expect(workspace.status.kind).toBe("problem");
+  });
 });
 
 describe("what a run reports back", () => {
   test("the outcome is kept so the interface can show it", async () => {
     backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
-    backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0 };
+    backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -386,7 +480,7 @@ describe("what a run reports back", () => {
 
   test("files left waiting for a decision are reported, not swallowed", async () => {
     backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask" };
-    backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0 };
+    backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
 

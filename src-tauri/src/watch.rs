@@ -139,6 +139,8 @@ mod tests {
             skipped,
             failed,
             needs_manual_restore: 0,
+            not_in_trash: 0,
+            already_gone: 0,
         }
     }
 

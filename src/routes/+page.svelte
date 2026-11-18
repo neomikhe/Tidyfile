@@ -14,6 +14,7 @@
   ];
 
   const workspace = new Workspace();
+  const them = (count: number): string => (count === 1 ? "it" : "them");
   let activeView = $state<View>("rules");
   let editingId = $state<string | null>(null);
 
@@ -182,10 +183,34 @@
       <h2 id="activity-heading">Activity</h2>
 
       {#if workspace.manualRestore > 0}
-        <p class="unfinished" role="alert">
+        <p class="unfinished" role="status">
           {workspace.manualRestore} file{workspace.manualRestore === 1 ? "" : "s"} could not be
           brought back from the Trash automatically. This system does not allow it. Open the Trash
           and use Put Back to restore {workspace.manualRestore === 1 ? "it" : "them"}.
+        </p>
+      {/if}
+
+      {#if workspace.notInTrash > 0}
+        <p class="unfinished" role="status">
+          {workspace.notInTrash} file{workspace.notInTrash === 1 ? " was" : "s were"} no longer in
+          the Trash, so {workspace.notInTrash === 1 ? "it" : "they"} could not be put back. If you can
+          still see {them(workspace.notInTrash)} there, restore {them(workspace.notInTrash)} from the
+          Trash yourself.
+        </p>
+      {/if}
+
+      {#if workspace.alreadyGone > 0}
+        <p class="unfinished" role="status">
+          {workspace.alreadyGone} file{workspace.alreadyGone === 1 ? " had" : "s had"} already been moved or
+          deleted since, so there was nothing to put back.
+        </p>
+      {/if}
+
+      {#if workspace.couldNotPutBack > 0}
+        <p class="unfinished" role="status">
+          {workspace.couldNotPutBack} file{workspace.couldNotPutBack === 1 ? "" : "s"} could not be put
+          back. Nothing was overwritten. Close any program that is using {them(workspace.couldNotPutBack)},
+          or move away a file that now has the same name, then undo again.
         </p>
       {/if}
 

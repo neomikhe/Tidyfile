@@ -28,7 +28,7 @@ jobs:
             args: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -50,7 +50,7 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           package-manager-cache: false
@@ -75,10 +75,11 @@ jobs:
       - name: Publish SHA256SUMS
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
           mkdir installers
           cd installers
-          gh release download "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY"
           sha256sum -- * > ../SHA256SUMS.txt
           cd ..
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"

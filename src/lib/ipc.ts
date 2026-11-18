@@ -42,6 +42,8 @@ export interface BatchReport {
   skipped: number;
   failed: number;
   needsManualRestore: number;
+  notInTrash: number;
+  alreadyGone: number;
 }
 
 export type ErrorCode =

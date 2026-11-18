@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use notify::{EventKind, RecommendedWatcher, RecursiveMode};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer_opt,
 };
 
 const TEMPORARY_EXTENSIONS: [&str; 7] = [
@@ -62,6 +62,17 @@ fn settled_paths(events: Vec<DebouncedEvent>) -> Vec<PathBuf> {
     paths
 }
 
+fn forward_settled(sender: Sender<PathBuf>) -> impl FnMut(DebounceEventResult) + Send + 'static {
+    move |result| {
+        let Ok(events) = result else {
+            return;
+        };
+        for path in settled_paths(events) {
+            let _ = sender.send(path);
+        }
+    }
+}
+
 pub struct FolderWatcher {
     debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     settled: Receiver<PathBuf>,
@@ -70,15 +81,15 @@ pub struct FolderWatcher {
 impl FolderWatcher {
     pub fn start(folder: &Path, quiet_period: Duration) -> Result<Self, WatcherError> {
         let (sender, settled) = mpsc::channel();
-        let mut debouncer =
-            new_debouncer(quiet_period, None, move |result: DebounceEventResult| {
-                let Ok(events) = result else {
-                    return;
-                };
-                for path in settled_paths(events) {
-                    let _ = sender.send(path);
-                }
-            })?;
+        // WHY: notify's default walks into symlinked folders, which can lead far outside this one
+        let config = Config::default().with_follow_symlinks(false);
+        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, RecommendedCache>(
+            quiet_period,
+            None,
+            forward_settled(sender),
+            RecommendedCache::new(),
+            config,
+        )?;
         debouncer.watch(folder, RecursiveMode::Recursive)?;
         Ok(Self { debouncer, settled })
     }
