@@ -48,7 +48,7 @@ Rename and subfolder templates accept `{name}`, `{ext}`, `{date}`, `{year}`, `{m
 
 ## Building from source
 
-Requires [Rust](https://rustup.rs) 1.85+ and [Node.js](https://nodejs.org) 22+, plus the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
+Requires [Rust](https://rustup.rs) 1.90+ and [Node.js](https://nodejs.org) 22+, plus the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
 
 ```bash
 npm install

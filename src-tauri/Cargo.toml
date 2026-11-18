@@ -5,7 +5,7 @@ description = "Rule-based file organizer for Windows, macOS and Linux"
 authors = ["Tidyfile contributors"]
 license = "GPL-3.0-only"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.90"
 
 [lib]
 name = "tidyfile_lib"
@@ -27,7 +27,7 @@ regex = "1.13.1"
 globset = "0.4.19"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 dunce = "1.0.5"
-tauri-plugin-dialog = "2.7.2"
+tauri-plugin-dialog = "2.8"
 
 [lints.rust]
 unsafe_code = "deny"

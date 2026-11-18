@@ -48,7 +48,7 @@ Las plantillas de renombrado y de subcarpetas aceptan `{name}`, `{ext}`, `{date}
 
 ## Compilar desde el código fuente
 
-Necesitas [Rust](https://rustup.rs) 1.85+ y [Node.js](https://nodejs.org) 22+, además de los [requisitos de Tauri](https://tauri.app/start/prerequisites/) para tu plataforma.
+Necesitas [Rust](https://rustup.rs) 1.90+ y [Node.js](https://nodejs.org) 22+, además de los [requisitos de Tauri](https://tauri.app/start/prerequisites/) para tu plataforma.
 
 ```bash
 npm install

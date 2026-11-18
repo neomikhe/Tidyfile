@@ -76,6 +76,23 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Tauri crates and npm packages match
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          node -e '
+            const { execSync } = require("child_process");
+            const fs = require("fs");
+            const meta = JSON.parse(execSync("cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml", { maxBuffer: 1e9 }));
+            const crate = (name) => meta.packages.find((p) => p.name === name).version;
+            const npm = (name) => JSON.parse(fs.readFileSync(`node_modules/${name}/package.json`, "utf8")).version;
+            const minor = (version) => version.split(".").slice(0, 2).join(".");
+            const pairs = [["tauri", "@tauri-apps/api"], ["tauri-plugin-dialog", "@tauri-apps/plugin-dialog"]];
+            const apart = pairs.filter(([c, n]) => minor(crate(c)) !== minor(npm(n)));
+            for (const [c, n] of apart) console.log(`::error::${c} ${crate(c)} and ${n} ${npm(n)} differ; the Tauri CLI refuses to build them together`);
+            process.exit(apart.length ? 1 : 0);
+          '
+
       - name: Format
         working-directory: src-tauri
         run: cargo fmt --all -- --check
