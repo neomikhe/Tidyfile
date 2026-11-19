@@ -31,6 +31,7 @@
 
   function show(view: View): void {
     activeView = view;
+    workspace.dismissRefusal();
     if (view === "settings") {
       void workspace.refreshFolderStates();
     }
@@ -364,6 +365,13 @@
         </ul>
       {/if}
       <button onclick={pickFolder}>Add folder</button>
+      {#if workspace.refusedFolder !== null}
+        <p class="problem" role="alert">
+          <bdi class="folder">{workspace.refusedFolder}</bdi> was not added. Tidyfile never works in
+          system folders, drive roots or a folder that holds your whole home folder. Choose a more
+          specific folder, such as Downloads.
+        </p>
+      {/if}
       <p class="note">
         System folders, drive roots and your whole home folder cannot be watched.
       </p>
@@ -580,9 +588,39 @@
     overflow-wrap: anywhere;
   }
 
-  .history li,
-  .preview li {
+  .history li {
     justify-content: space-between;
+  }
+
+  .preview li {
+    display: grid;
+    grid-template-columns: 3.5rem auto minmax(0, 1fr);
+    grid-template-areas:
+      "kind from from"
+      "kind arrow to";
+    column-gap: 0.6rem;
+    row-gap: 0.1rem;
+    align-items: baseline;
+  }
+
+  .preview .kind {
+    grid-area: kind;
+    justify-self: start;
+    align-self: start;
+  }
+
+  .preview .from {
+    grid-area: from;
+    overflow-wrap: anywhere;
+  }
+
+  .preview .arrow {
+    grid-area: arrow;
+    opacity: 0.6;
+  }
+
+  .preview .to {
+    grid-area: to;
   }
 
   .problem {

@@ -74,6 +74,7 @@ export class Workspace {
   lastRun = $state<BatchReport | null>(null);
   previewChanged = $state(false);
   loadProblem = $state<string | null>(null);
+  refusedFolder = $state<string | null>(null);
   private unreadable = $state<StoredFile[]>([]);
   private unlisten: UnlistenFn | null = null;
 
@@ -119,7 +120,7 @@ export class Workspace {
 
   private async applySettings(): Promise<void> {
     const settings = await loadSettings();
-    this.folders = settings.folders;
+    this.folders = settings.folders.filter((folder, index, all) => all.indexOf(folder) === index);
     this.onCollision = settings.onCollision;
     this.folderStates = await folderStatus(settings.folders);
   }
@@ -218,7 +219,16 @@ export class Workspace {
   }
 
   async addFolder(picked: string): Promise<void> {
+    this.refusedFolder = null;
     if (this.folders.includes(picked)) {
+      return;
+    }
+    const state = await this.checkNewFolder(picked);
+    if (state === null || this.folders.includes(picked)) {
+      return;
+    }
+    if (state === "forbidden") {
+      this.refusedFolder = picked;
       return;
     }
     this.folders = [...this.folders, picked];
@@ -228,7 +238,21 @@ export class Workspace {
     await this.refreshPreview();
   }
 
+  private async checkNewFolder(folder: string): Promise<FolderStatus["state"] | null> {
+    let state: FolderStatus["state"] | null = null;
+    await this.attempt(async () => {
+      const [checked] = await folderStatus([folder]);
+      state = checked?.state ?? null;
+    });
+    return state;
+  }
+
+  dismissRefusal(): void {
+    this.refusedFolder = null;
+  }
+
   async removeFolder(folder: string): Promise<void> {
+    this.refusedFolder = null;
     this.folders = this.folders.filter((kept) => kept !== folder);
     if (this.isWatched(folder)) {
       await this.setWatched(folder, false);

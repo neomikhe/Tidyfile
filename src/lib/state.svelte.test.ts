@@ -18,6 +18,8 @@ const backend = {
   undoFailed: 0,
   alreadyGone: 0,
   unreachable: [] as string[],
+  forbidden: [] as string[],
+  statusFails: false,
   report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 },
   gate: null as null | (() => void),
 };
@@ -42,6 +44,13 @@ function maybeFail(): void {
     backend.failNext = null;
     throw problem;
   }
+}
+
+function fakeStateOf(folder: string): "ok" | "unavailable" | "forbidden" {
+  if (backend.forbidden.includes(folder)) {
+    return "forbidden";
+  }
+  return backend.unreachable.includes(folder) ? "unavailable" : "ok";
 }
 
 vi.mock("./ipc", async (original) => {
@@ -108,12 +117,12 @@ vi.mock("./ipc", async (original) => {
     startWatching: vi.fn(async () => undefined),
     stopWatching: vi.fn(async () => undefined),
     watchedFolders: vi.fn(async () => backend.settings.watched),
-    folderStatus: vi.fn(async (folders: string[]) =>
-      folders.map((folder) => ({
-        folder,
-        state: backend.unreachable.includes(folder) ? ("unavailable" as const) : ("ok" as const),
-      })),
-    ),
+    folderStatus: vi.fn(async (folders: string[]) => {
+      if (backend.statusFails) {
+        throw { code: "unavailable", message: "the folder could not be checked" };
+      }
+      return folders.map((folder) => ({ folder, state: fakeStateOf(folder) }));
+    }),
   };
 });
 
@@ -151,6 +160,8 @@ beforeEach(() => {
   backend.undoFailed = 0;
   backend.alreadyGone = 0;
   backend.unreachable = [];
+  backend.forbidden = [];
+  backend.statusFails = false;
   backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
   backend.gate = null;
 });
@@ -368,6 +379,63 @@ describe("folders", () => {
     await workspace.removeFolder("/one");
 
     expect(workspace.folders).toEqual(["/two"]);
+  });
+
+  test("a folder that can never be used is refused when picked, and nothing is saved", async () => {
+    backend.settings = { folders: ["/downloads"], watched: [], onCollision: "suffix" };
+    backend.preview = [{ kind: "move", source: "/downloads/a.pdf", destination: "/out/a.pdf" }];
+    backend.forbidden = ["C:\\Windows"];
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.addFolder("C:\\Windows");
+
+    expect(workspace.folders).toEqual(["/downloads"]);
+    expect(backend.settingsSaved).toBe(0);
+    expect(workspace.refusedFolder).toBe("C:\\Windows");
+    expect(workspace.preview).toEqual(backend.preview);
+  });
+
+  test("picking a usable folder afterwards clears the refusal", async () => {
+    backend.forbidden = ["C:\\Windows"];
+    const workspace = new Workspace();
+    await workspace.initialise();
+    await workspace.addFolder("C:\\Windows");
+
+    await workspace.addFolder("/downloads");
+
+    expect(workspace.folders).toEqual(["/downloads"]);
+    expect(workspace.refusedFolder).toBeNull();
+  });
+
+  test("picking the same folder twice while it is being checked keeps one entry", async () => {
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await Promise.all([workspace.addFolder("/slow-nas"), workspace.addFolder("/slow-nas")]);
+
+    expect(workspace.folders).toEqual(["/slow-nas"]);
+  });
+
+  test("a folder that could not be checked is not added", async () => {
+    const workspace = new Workspace();
+    await workspace.initialise();
+    backend.statusFails = true;
+
+    await workspace.addFolder("C:\\Windows");
+
+    expect(workspace.folders).toEqual([]);
+    expect(backend.settingsSaved).toBe(0);
+    expect(workspace.status).toEqual({ kind: "problem", message: "the folder could not be checked" });
+  });
+
+  test("a folder saved twice by an older version is shown once", async () => {
+    backend.settings = { folders: ["/one", "/one", "/two"], watched: [], onCollision: "suffix" };
+    const workspace = new Workspace();
+
+    await workspace.initialise();
+
+    expect(workspace.folders).toEqual(["/one", "/two"]);
   });
 });
 

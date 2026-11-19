@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::executor::{Collision, Executor, Outcome, SkipReason};
 use crate::journal::{Journal, JournalError, Operation};
 use crate::paths::{self, PathError};
-use crate::rules::{EvaluationError, PlanContext, Rule, plan};
+use crate::rules::{EvaluationError, FileFacts, PlanContext, Rule, plan};
 use crate::watcher::is_temporary;
 
 const MAX_SCAN_DEPTH: usize = 16;
@@ -173,7 +173,7 @@ impl Tidyfile {
         if !is_really_inside(root, file) {
             return Ok(nothing_happened());
         }
-        let Ok(facts) = crate::rules::FileFacts::gather(file, root) else {
+        let Some(facts) = plannable(file, root) else {
             return Ok(nothing_happened());
         };
         let context = PlanContext {
@@ -236,7 +236,7 @@ impl Tidyfile {
         let now = SystemTime::now();
         let mut operations = Vec::new();
         for (index, (root, file)) in files_in(folders)?.into_iter().enumerate() {
-            let Ok(facts) = crate::rules::FileFacts::gather(&file, &root) else {
+            let Some(facts) = plannable(&file, &root) else {
                 continue;
             };
             let context = PlanContext {
@@ -249,20 +249,48 @@ impl Tidyfile {
     }
 }
 
-// WHY: a watcher event can name a file through a link that leads out of the watched folder
+fn plannable(file: &Path, root: &Path) -> Option<FileFacts> {
+    FileFacts::gather(file, root).ok().filter(is_worth_planning)
+}
+
+// WHY: an empty file may be a browser's placeholder, and a non-UTF-8 path cannot be journaled (ADR-010)
+fn is_worth_planning(facts: &FileFacts) -> bool {
+    facts.size > 0 && facts.path.to_str().is_some()
+}
+
+// WHY: a watcher event can name a file through a link, or inside a download that is still running
 fn is_really_inside(root: &Path, file: &Path) -> bool {
-    if is_link(root) || is_link(file) {
+    if is_link(root) || !is_plain_file(file) {
         return false;
     }
-    let real_parent = file.parent().and_then(|parent| parent.canonicalize().ok());
-    match (real_parent, root.canonicalize()) {
-        (Some(parent), Ok(root)) => parent.starts_with(root),
-        _ => false,
-    }
+    folders_between(root, file).is_some_and(|folders| !holds_a_download(&folders))
+}
+
+fn folders_between(root: &Path, file: &Path) -> Option<PathBuf> {
+    let parent = file.parent()?.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    parent.strip_prefix(&root).ok().map(Path::to_path_buf)
+}
+
+fn holds_a_download(folders: &Path) -> bool {
+    folders
+        .components()
+        .any(|part| is_download_in_progress(Path::new(part.as_os_str())))
+}
+
+// WHY: Safari downloads into name.ext.download/, where the partial file already has its real name
+fn is_download_in_progress(folder: &Path) -> bool {
+    folder
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("download"))
 }
 
 fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).map_or(true, |data| data.is_symlink())
+}
+
+fn is_plain_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|data| data.is_file())
 }
 
 pub fn statuses(folders: &[PathBuf]) -> Vec<FolderStatus> {
@@ -330,7 +358,7 @@ fn visit(entry: &fs::DirEntry, depth: usize, found: &mut Vec<PathBuf>) {
     if kind.is_symlink() {
         return;
     }
-    if kind.is_dir() {
+    if kind.is_dir() && !is_download_in_progress(&path) {
         collect(&path, depth + 1, found);
     } else if kind.is_file() && !is_temporary(&path) {
         found.push(path);
@@ -666,6 +694,177 @@ mod tests {
             .unwrap();
 
         assert!(planned.is_empty(), "temporaries leaked into the plan");
+    }
+
+    #[cfg(windows)]
+    fn unrecordable_name() -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = "m-caf".encode_utf16().collect();
+        units.push(0xD800);
+        units.extend(".pdf".encode_utf16());
+        std::ffi::OsString::from_wide(&units)
+    }
+
+    #[cfg(unix)]
+    fn unrecordable_name() -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b"m-caf\xe9.pdf".to_vec())
+    }
+
+    fn facts_for(name: std::ffi::OsString, size: u64) -> FileFacts {
+        FileFacts {
+            path: Path::new("watched").join(name),
+            root: PathBuf::from("watched"),
+            size,
+            modified: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn only_files_with_content_and_a_recordable_name_are_planned() {
+        assert!(is_worth_planning(&facts_for("report.pdf".into(), 10)));
+        assert!(!is_worth_planning(&facts_for("report.pdf".into(), 0)));
+        assert!(!is_worth_planning(&facts_for(unrecordable_name(), 10)));
+    }
+
+    #[test]
+    fn an_empty_file_is_left_out_of_the_preview_and_the_run() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("placeholder.pdf"), "");
+        write(&root.path().join("invoice.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let planned = service.simulate(&rules, &folders).unwrap();
+        let report = service
+            .organize(&rules, &folders, Collision::Suffix)
+            .unwrap();
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(report.applied, 1);
+        assert!(root.path().join("placeholder.pdf").exists());
+    }
+
+    #[test]
+    fn a_folder_named_by_a_watcher_event_is_never_acted_on() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        let folder = root.path().join("looks-like.pdf");
+        write(&folder.join("inside.txt"), "content");
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize_file(
+                &[pdf_rule(out.path())],
+                root.path(),
+                &folder,
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(report.applied, 0);
+        assert!(folder.join("inside.txt").exists());
+    }
+
+    #[test]
+    fn the_scan_does_not_enter_a_folder_a_download_is_still_using() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("report.pdf.download/report.pdf"), "half");
+        let service = Tidyfile::in_memory().unwrap();
+
+        let planned = service
+            .simulate(&[pdf_rule(out.path())], &[root.path().to_path_buf()])
+            .unwrap();
+
+        assert!(
+            planned.is_empty(),
+            "a download in progress entered the plan"
+        );
+    }
+
+    #[test]
+    fn a_watched_file_inside_a_download_in_progress_is_left_alone() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        let direct = root.path().join("report.pdf.download/report.pdf");
+        let nested = root.path().join("photos.zip.download/inner/a.pdf");
+        write(&direct, "half");
+        write(&nested, "half");
+        let rules = [pdf_rule(out.path())];
+        let service = Tidyfile::in_memory().unwrap();
+
+        for file in [&direct, &nested] {
+            let report = service
+                .organize_file(&rules, root.path(), file, Collision::Suffix)
+                .unwrap();
+            assert_eq!(
+                report.applied,
+                0,
+                "{} was tidied mid-download",
+                file.display()
+            );
+        }
+    }
+
+    #[test]
+    fn folders_that_only_look_temporary_are_still_tidied() {
+        let base = watchable_folder();
+        let out = watchable_folder();
+        let root = base.path().join("Site.download");
+        write(&root.join("Backup.tmp/invoice.pdf"), "content");
+        write(&root.join("receipt.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let planned = service
+            .simulate(&rules, std::slice::from_ref(&root))
+            .unwrap();
+        let report = service
+            .organize_file(
+                &rules,
+                &root,
+                &root.join("Backup.tmp/invoice.pdf"),
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(
+            planned.len(),
+            2,
+            "the watched folder's own name or a .tmp folder was skipped"
+        );
+        assert_eq!(report.applied, 1);
+    }
+
+    // WHY: APFS refuses names that are not UTF-8, so macOS cannot even create this file
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_name_the_journal_cannot_record_is_left_alone_and_the_rest_still_tidied() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a-first.pdf"), "content");
+        let unrecordable = root.path().join(unrecordable_name());
+        fs::write(&unrecordable, "a name from an old zip").unwrap();
+        write(&root.path().join("z-last.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let planned = service.simulate(&rules, &folders).unwrap();
+        let report = service.organize(&rules, &folders, Collision::Suffix);
+
+        assert_eq!(
+            planned.len(),
+            2,
+            "the preview promised a change that cannot be recorded"
+        );
+        let report = report.expect("one unrecordable name made the whole run fail");
+        assert_eq!((report.applied, report.failed), (2, 0));
+        assert!(out.path().join("z-last.pdf").exists());
+        assert!(unrecordable.exists());
     }
 
     #[test]

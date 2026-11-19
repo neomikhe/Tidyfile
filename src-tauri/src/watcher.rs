@@ -55,11 +55,16 @@ fn settled_paths(events: Vec<DebouncedEvent>) -> Vec<PathBuf> {
         .into_iter()
         .filter(|event| is_content_change(event.kind))
         .flat_map(|event| event.paths.clone())
-        .filter(|path| path.is_file() && !is_temporary(path))
+        .filter(|path| !is_temporary(path) && has_content(path))
         .collect();
     paths.sort();
     paths.dedup();
     paths
+}
+
+// WHY: Firefox reserves the final name with an empty file while it downloads into a .part beside it
+fn has_content(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|data| data.is_file() && data.len() > 0)
 }
 
 fn forward_settled(sender: Sender<PathBuf>) -> impl FnMut(DebounceEventResult) + Send + 'static {
@@ -131,6 +136,35 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_never_reported_as_a_settled_file() {
+        let folder = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        fs::write(elsewhere.path().join("secret.pdf"), b"outside").unwrap();
+        let watcher = FolderWatcher::start(folder.path(), Duration::from_millis(200)).unwrap();
+
+        std::os::unix::fs::symlink(
+            elsewhere.path().join("secret.pdf"),
+            folder.path().join("link.pdf"),
+        )
+        .unwrap();
+        fs::write(folder.path().join("real.pdf"), b"content").unwrap();
+        let mut reported = Vec::new();
+        let mut wait = Duration::from_secs(10);
+        while let Some(path) = watcher.next_settled(wait) {
+            reported.push(path.file_name().unwrap().to_owned());
+            wait = Duration::from_secs(1);
+        }
+        watcher.stop();
+
+        assert!(reported.iter().any(|name| name == "real.pdf"));
+        assert!(
+            reported.iter().all(|name| name != "link.pdf"),
+            "a link was reported as a file"
+        );
+    }
+
     #[test]
     fn extension_match_is_case_insensitive() {
         assert!(is_temporary(Path::new("a.CRDOWNLOAD")));
@@ -157,5 +191,28 @@ mod tests {
 
         let settled = settled.expect("watcher reported no file");
         assert_eq!(settled.file_name().unwrap(), "invoice.pdf");
+    }
+
+    #[test]
+    fn an_empty_placeholder_waits_until_its_download_finishes() {
+        let folder = TempDir::new().unwrap();
+        let watcher = FolderWatcher::start(folder.path(), Duration::from_millis(200)).unwrap();
+        let placeholder = folder.path().join("report.pdf");
+        let partial = folder.path().join("report.Ab12Cd34.pdf.part");
+        fs::write(&placeholder, b"").unwrap();
+        fs::write(&partial, b"half of it").unwrap();
+
+        let too_early = watcher.next_settled(Duration::from_secs(2));
+        fs::write(&partial, b"all of the report").unwrap();
+        fs::rename(&partial, &placeholder).unwrap();
+        let finished = watcher.next_settled(Duration::from_secs(10));
+        watcher.stop();
+
+        assert!(
+            too_early.is_none(),
+            "the empty name Firefox reserves was tidied before the download finished"
+        );
+        let finished = finished.expect("the finished download was never reported");
+        assert_eq!(finished.file_name().unwrap(), "report.pdf");
     }
 }

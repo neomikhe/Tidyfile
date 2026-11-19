@@ -31,12 +31,21 @@
     "shortDescription": "Rule-based file organizer",
     "longDescription": "Tidyfile watches folders and applies user-defined rules to keep them organized. Runs entirely offline with a simulation step and full undo history.",
     "copyright": "Copyright (C) 2026 Tidyfile contributors",
+    "publisher": "Tidyfile contributors",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      },
+      "wix": {
+        "upgradeCode": "e79cf2b3-293c-5339-ba0e-97dff4962a63"
+      }
+    }
   }
 }
