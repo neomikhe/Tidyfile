@@ -8,17 +8,21 @@
   import ConditionRow from "./ConditionRow.svelte";
   import ActionRow from "./ActionRow.svelte";
   import RuleExample from "./RuleExample.svelte";
+  import { addedAfter, hasProblem, keyed, replaced, valuesOf, without, type Keyed } from "./rows";
 
   let { workspace, rule, onclose }: { workspace: Workspace; rule: Rule | null; onclose: () => void } = $props();
 
   let dialog = $state<HTMLDialogElement | null>(null);
-  let draft = $state<Rule>(startingDraft());
+  const initial = startingDraft();
+  let draft = $state<Rule>(initial);
+  let conditionRows = $state(keyed(initial.conditions));
+  let actionRows = $state(keyed(initial.actions));
   let problems = $state<Record<number, boolean>>({});
   let confirmingDelete = $state(false);
   let example = $state<Example | null>(null);
   const platform = detectPlatform(globalThis.navigator?.userAgent ?? "");
   const opener = typeof document === "undefined" ? null : document.activeElement;
-  const blocked = $derived(isIncomplete(draft) || Object.values(problems).some(Boolean));
+  const blocked = $derived(isIncomplete(draft) || hasProblem(conditionRows, problems));
 
   function startingDraft(): Rule {
     return rule === null ? { ...blankRule(), name: t("editor.newTitle") } : $state.snapshot(rule);
@@ -44,24 +48,27 @@
     onclose();
   }
 
-  function setConditions(conditions: Condition[]): void {
-    draft.conditions = conditions;
+  function setConditions(rows: Keyed<Condition>[]): void {
+    conditionRows = rows;
+    draft.conditions = valuesOf(rows);
   }
 
-  function setActions(actions: Action[]): void {
-    draft.actions = actions;
+  function setActions(rows: Keyed<Action>[]): void {
+    actionRows = rows;
+    draft.actions = valuesOf(rows);
   }
 
-  function insertAfter<T>(items: T[], index: number, item: T): T[] {
-    return [...items.slice(0, index + 1), item, ...items.slice(index + 1)];
+  function changeCondition(row: Keyed<Condition>, changed: Condition): void {
+    if (changed.type !== row.value.type) problems = { ...problems, [row.key]: false };
+    setConditions(replaced(conditionRows, row.key, changed));
   }
 
-  async function verify(index: number, kind: "glob" | "regex", pattern: string): Promise<void> {
+  async function verify(key: number, kind: "glob" | "regex", pattern: string): Promise<void> {
     try {
       if (pattern.trim().length > 0) await checkPattern(kind, pattern);
-      problems = { ...problems, [index]: false };
+      problems = { ...problems, [key]: false };
     } catch {
-      problems = { ...problems, [index]: true };
+      problems = { ...problems, [key]: true };
     }
   }
 
@@ -95,29 +102,29 @@
     <span>{t("editor.matchSuffix")}</span>
   </div>
   <div class="box">
-    {#each draft.conditions as condition, index (index)}
+    {#each conditionRows as row (row.key)}
       <ConditionRow
-        {condition}
-        problem={problems[index] ?? false}
-        canRemove={draft.conditions.length > 1}
-        onchange={(changed) => setConditions(draft.conditions.map((item, at) => (at === index ? changed : item)))}
-        onremove={() => setConditions(draft.conditions.filter((_, at) => at !== index))}
-        onadd={() => setConditions(insertAfter(draft.conditions, index, blankCondition("extension")))}
-        onverify={(kind, pattern) => verify(index, kind, pattern)}
+        condition={row.value}
+        problem={problems[row.key] ?? false}
+        canRemove={conditionRows.length > 1}
+        onchange={(changed) => changeCondition(row, changed)}
+        onremove={() => setConditions(without(conditionRows, row.key))}
+        onadd={() => setConditions(addedAfter(conditionRows, row.key, blankCondition("extension")))}
+        onverify={(kind, pattern) => verify(row.key, kind, pattern)}
       />
     {/each}
   </div>
 
   <p class="section">{t("editor.then")}</p>
   <div class="box">
-    {#each draft.actions as action, index (index)}
+    {#each actionRows as row (row.key)}
       <ActionRow
-        {action}
+        action={row.value}
         {platform}
-        canRemove={draft.actions.length > 1}
-        onchange={(changed) => setActions(draft.actions.map((item, at) => (at === index ? changed : item)))}
-        onremove={() => setActions(draft.actions.filter((_, at) => at !== index))}
-        onadd={() => setActions(insertAfter(draft.actions, index, blankAction("moveTo")))}
+        canRemove={actionRows.length > 1}
+        onchange={(changed) => setActions(replaced(actionRows, row.key, changed))}
+        onremove={() => setActions(without(actionRows, row.key))}
+        onadd={() => setActions(addedAfter(actionRows, row.key, blankAction("moveTo")))}
       />
     {/each}
   </div>

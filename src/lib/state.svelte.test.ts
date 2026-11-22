@@ -140,6 +140,7 @@ vi.stubGlobal("navigator", { language: "en-US" });
 const { Workspace } = await import("./state.svelte");
 const { i18n } = await import("./i18n/index.svelte");
 const { en } = await import("./i18n/en");
+const { es } = await import("./i18n/es");
 
 function aRule(id: string, enabled: boolean): Rule {
   return {
@@ -521,7 +522,8 @@ describe("folders", () => {
 
     expect(workspace.folders).toEqual([]);
     expect(backend.settingsSaved).toBe(0);
-    expect(workspace.status).toEqual({ kind: "problem", message: en["error.unavailable"] });
+    expect(workspace.status.kind).toBe("problem");
+    expect(workspace.problem).toBe(en["error.unavailable"]);
   });
 
   test("a folder saved twice by an older version is shown once", async () => {
@@ -544,11 +546,32 @@ describe("failures", () => {
 
     await workspace.refreshPreview();
 
-    expect(workspace.status).toEqual({
-      kind: "problem",
-      message: en["error.forbiddenFolder"],
-    });
+    expect(workspace.status.kind).toBe("problem");
+    expect(workspace.problem).toBe(en["error.forbiddenFolder"]);
     expect(workspace.preview).toBeNull();
+  });
+
+  test("a problem on screen follows a change of language", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    backend.failNext = { code: "forbiddenFolder", message: "this folder cannot be watched" };
+    await workspace.refreshPreview();
+
+    i18n.locale = "es";
+
+    expect(workspace.problem).toBe(es["error.forbiddenFolder"]);
+  });
+
+  test("a load problem follows a change of language", async () => {
+    backend.failNext = { code: "rulesMalformed", message: "the rule file is not valid Tidyfile JSON" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    i18n.locale = "es";
+
+    expect(workspace.loadProblem).toBe(es["error.rulesMalformed"]);
   });
 
   test("an unrecognised failure still yields a message rather than crashing", async () => {

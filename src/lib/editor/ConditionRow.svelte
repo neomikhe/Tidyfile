@@ -59,7 +59,9 @@
     />
   {:else if condition.type === "largerThan" || condition.type === "smallerThan"}
     {@const type = condition.type}
-    <SizeField bytes={condition.bytes} label={t(conditionLabels[type])} onchange={(bytes) => onchange({ type, bytes })} />
+    {#key type}
+      <SizeField bytes={condition.bytes} label={t(conditionLabels[type])} onchange={(bytes) => onchange({ type, bytes })} />
+    {/key}
     <span class="grow"></span>
   {:else if condition.type === "olderThan" || condition.type === "newerThan"}
     <input

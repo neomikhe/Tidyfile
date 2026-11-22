@@ -29,7 +29,7 @@ const invoices = rule({
     { type: "nameContains", text: "factura" },
     { type: "extension", anyOf: ["pdf"] },
   ],
-  actions: [{ type: "moveTo", folder: "C:\\Users\\x\\Documents", subfolder: "Facturas/{year}" }],
+  actions: [{ type: "moveTo", folder: "D:\\Data\\Documents", subfolder: "Facturas/{year}" }],
 });
 
 function entry(changes: Partial<ActivityEntry>): ActivityEntry {
@@ -73,16 +73,16 @@ describe("describeRule", () => {
 
 describe("folder names", () => {
   test("well-known folders show their name in the chosen language", () => {
-    expect(knownFolderLabel("C:\\Users\\x\\Downloads")).toBe("Descargas");
-    expect(knownFolderLabel("\\\\?\\C:\\Users\\x\\downloads\\")).toBe("Descargas");
+    expect(knownFolderLabel("D:\\Data\\Downloads")).toBe("Descargas");
+    expect(knownFolderLabel("\\\\?\\D:\\Data\\downloads\\")).toBe("Descargas");
     expect(knownFolderLabel("D:\\Escáner")).toBe("Escáner");
     i18n.locale = "en";
-    expect(knownFolderLabel("C:\\Users\\x\\Downloads")).toBe("Downloads");
+    expect(knownFolderLabel("D:\\Data\\Downloads")).toBe("Downloads");
   });
 
   test("the watching label counts the folders", () => {
     expect(watchingLabel([])).toBe("Vigilancia apagada");
-    expect(watchingLabel(["C:\\Users\\x\\Downloads"])).toBe("Vigilando Descargas");
+    expect(watchingLabel(["D:\\Data\\Downloads"])).toBe("Vigilando Descargas");
     expect(watchingLabel(["C:\\a", "D:\\b"])).toBe("Vigilando 2 carpetas");
   });
 });

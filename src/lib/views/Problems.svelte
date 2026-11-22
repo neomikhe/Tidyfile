@@ -17,6 +17,6 @@
   </Banner>
 {/if}
 
-{#if workspace.status.kind === "problem" && workspace.status.message !== workspace.loadProblem}
-  <Banner kind="problem"><p>{workspace.status.message}</p></Banner>
+{#if workspace.problem !== null && workspace.problem !== workspace.loadProblem}
+  <Banner kind="problem"><p>{workspace.problem}</p></Banner>
 {/if}

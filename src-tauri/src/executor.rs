@@ -219,7 +219,7 @@ impl Executor {
                 },
                 Collision::Suffix,
             ),
-            Operation::Copy { to, .. } => self.apply_one(
+            Operation::Copy { to, .. } => self.apply_planned(
                 batch,
                 &Operation::Trash { from: to.clone() },
                 Collision::Suffix,
@@ -848,34 +848,98 @@ mod tests {
     }
 
     #[test]
-    fn moves_and_undoing_a_copy_do_not_depend_on_the_recycle_bin_check() {
+    fn moving_and_undoing_a_move_do_not_depend_on_the_recycle_bin_check() {
         let root = TempDir::new().unwrap();
         let source = root.path().join("report.pdf");
         let moved = root.path().join("moved/report.pdf");
-        let duplicate = root.path().join("backup/report.pdf");
         write(&source, "content");
         let executor = without_recycle_bin();
-        let copy = Operation::Copy {
-            from: source.clone(),
-            to: duplicate.clone(),
-        };
-
-        executor.apply("copy", &[copy], Collision::Suffix).unwrap();
-        executor.undo_batch("copy").unwrap();
         let moving = Operation::Move {
             from: source.clone(),
             to: moved.clone(),
         };
-        let outcomes = executor
+
+        let applied = executor
             .apply("move", &[moving], Collision::Suffix)
             .unwrap();
-
-        assert!(
-            !duplicate.exists(),
-            "undoing our own copy keeps today's behaviour"
-        );
-        assert!(matches!(outcomes[0], Outcome::Applied(_)));
+        assert!(matches!(applied[..], [Outcome::Applied(_)]));
         assert_eq!(fs::read_to_string(&moved).unwrap(), "content");
+        let undone = executor.undo_batch("move").unwrap();
+
+        assert!(matches!(undone[..], [Outcome::Applied(_)]));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "content");
+        assert!(!moved.exists());
+    }
+
+    fn copy_of(source: &Path, duplicate: &Path) -> Operation {
+        Operation::Copy {
+            from: source.to_path_buf(),
+            to: duplicate.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn undoing_a_copy_on_a_drive_without_recycle_bin_fails_and_keeps_the_copy() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("invoice.pdf");
+        let duplicate = root.path().join("nas/invoice.pdf");
+        write(&source, "original");
+        let executor = without_recycle_bin();
+        let copy = copy_of(&source, &duplicate);
+        executor.apply("copy", &[copy], Collision::Suffix).unwrap();
+        write(&duplicate, "edited after the copy");
+
+        let undone = executor.undo_batch("copy").unwrap();
+
+        assert_eq!(
+            undone,
+            [Outcome::Failed(
+                "the Recycle Bin is not available on this drive".into()
+            )]
+        );
+        assert_eq!(
+            fs::read_to_string(&duplicate).unwrap(),
+            "edited after the copy"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        let refusals = executor.journal().operations_in_batch("copy:undo").unwrap();
+        assert_eq!(refusals.len(), 1, "the refusal must show in the history");
+        assert_eq!(refusals[0].state, State::Failed);
+    }
+
+    #[test]
+    fn a_refused_copy_undo_succeeds_once_the_recycle_bin_is_back() {
+        let root = TempDir::new().unwrap();
+        let journal = root.path().join("journal.sqlite");
+        let source = root.path().join("invoice.pdf");
+        let duplicate = root.path().join("usb/invoice.pdf");
+        write(&source, "original");
+        let refusing = Executor::judging_recycle_bin(Journal::open(&journal).unwrap(), |_| false);
+        let copy = copy_of(&source, &duplicate);
+        refusing.apply("copy", &[copy], Collision::Suffix).unwrap();
+        refusing.undo_batch("copy").unwrap();
+        assert_eq!(
+            refusing.journal().applied_in_batch("copy").unwrap().len(),
+            1
+        );
+        drop(refusing);
+
+        let restored = Executor::judging_recycle_bin(Journal::open(&journal).unwrap(), |_| true);
+        let undone = restored.undo_batch("copy").unwrap();
+
+        assert!(matches!(
+            undone[..],
+            [Outcome::Applied(Operation::Trash { .. })]
+        ));
+        assert!(!duplicate.exists(), "the second undo must remove the copy");
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert!(
+            restored
+                .journal()
+                .applied_in_batch("copy")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

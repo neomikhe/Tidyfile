@@ -35,7 +35,7 @@ import { isIncomplete, logicChanged } from "./factories";
 
 export type SaveOutcome = "added" | "updated" | "deactivated";
 
-export type Status ={ kind: "idle" } | { kind: "working" } | { kind: "problem"; message: string };
+export type Status = { kind: "idle" } | { kind: "working" } | { kind: "problem"; error: unknown };
 
 function flip(rule: Rule): Rule {
   return { ...rule, enabled: !rule.enabled };
@@ -75,7 +75,7 @@ export class Workspace {
   alreadyGone = $state(0);
   lastRun = $state<BatchReport | null>(null);
   previewChanged = $state(false);
-  loadProblem = $state<string | null>(null);
+  private loadFailure = $state<{ error: unknown } | null>(null);
   refusedFolder = $state<string | null>(null);
   language = $state<Language>("auto");
   deactivatedRule = $state<string | null>(null);
@@ -118,7 +118,7 @@ export class Workspace {
       this.watched = await watchedFolders();
     });
     if (problems.length > 0) {
-      this.loadProblem = describeError(problems[0]);
+      this.loadFailure = { error: problems[0] };
       throw problems[0];
     }
   }
@@ -146,6 +146,14 @@ export class Workspace {
 
   get savesBlocked(): boolean {
     return this.unreadable.length > 0;
+  }
+
+  get loadProblem(): string | null {
+    return this.loadFailure === null ? null : describeError(this.loadFailure.error);
+  }
+
+  get problem(): string | null {
+    return this.status.kind === "problem" ? describeError(this.status.error) : null;
   }
 
   async acknowledgeUnfinished(): Promise<void> {
@@ -428,7 +436,7 @@ export class Workspace {
   }
 
   private inFlight = 0;
-  private failure: string | null = null;
+  private failure: { error: unknown } | null = null;
 
   private async attempt(work: () => Promise<void>): Promise<void> {
     this.inFlight += 1;
@@ -437,12 +445,12 @@ export class Workspace {
       await work();
     } catch (error) {
       this.preview = null;
-      this.failure = describeError(error);
+      this.failure = { error };
     } finally {
       this.inFlight -= 1;
       if (this.inFlight === 0) {
         this.status =
-          this.failure === null ? { kind: "idle" } : { kind: "problem", message: this.failure };
+          this.failure === null ? { kind: "idle" } : { kind: "problem", error: this.failure.error };
         this.failure = null;
       }
     }
