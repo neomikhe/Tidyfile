@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tidyfile_lib::executor::Collision;
 use tidyfile_lib::rules::{Action, Combinator, Condition, Rule};
 use tidyfile_lib::service::Tidyfile;
-use tidyfile_lib::settings::Settings;
+use tidyfile_lib::settings::{Language, Settings};
 use tidyfile_lib::store;
 
 // WHY: macOS keeps the system temp folder under /private, where no watched folder is allowed
@@ -121,6 +121,7 @@ fn a_whole_session_tidies_a_messy_folder_and_puts_it_all_back() {
             folders: vec![downloads.path().to_path_buf()],
             watched: Vec::new(),
             on_collision: Collision::Suffix,
+            language: Language::Auto,
         },
     )
     .unwrap();

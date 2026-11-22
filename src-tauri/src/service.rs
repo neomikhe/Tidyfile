@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::executor::{Collision, Executor, Outcome, SkipReason};
-use crate::journal::{Journal, JournalError, Operation};
+use crate::journal::{Journal, JournalError, Operation, Origin};
 use crate::paths::{self, PathError};
 use crate::rules::{EvaluationError, FileFacts, PlanContext, Rule, plan};
 use crate::watcher::is_temporary;
@@ -36,12 +36,32 @@ pub struct Shown<'a> {
     pub on_collision: Collision,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Provenance<'a> {
+    pub origin: Origin,
+    pub folder: Option<&'a Path>,
+}
+
+impl Provenance<'_> {
+    const MANUAL: Self = Self {
+        origin: Origin::Manual,
+        folder: None,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedChange {
     pub kind: String,
     pub source: String,
     pub destination: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleExample {
+    pub change: Option<PlannedChange>,
+    pub taken_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,6 +73,8 @@ pub struct ActivityEntry {
     pub failed: usize,
     pub skipped: usize,
     pub recorded_at: i64,
+    pub origin: Option<String>,
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -110,7 +132,7 @@ impl Tidyfile {
         on_collision: Collision,
     ) -> Result<BatchReport, ServiceError> {
         let operations = self.plan_folders(rules, folders)?;
-        self.apply_batch(&operations, on_collision)
+        self.apply_batch(&operations, on_collision, Provenance::MANUAL)
     }
 
     // WHY: comparing under the same lock that applies leaves no gap for the disk to change unseen
@@ -128,15 +150,21 @@ impl Tidyfile {
         {
             return Err(ServiceError::PlanChanged);
         }
-        self.apply_batch(&operations, shown.on_collision)
+        self.apply_batch(&operations, shown.on_collision, Provenance::MANUAL)
     }
 
     fn apply_batch(
         &self,
         operations: &[Operation],
         on_collision: Collision,
+        provenance: Provenance<'_>,
     ) -> Result<BatchReport, ServiceError> {
         let batch = next_batch_id();
+        if !operations.is_empty() {
+            self.executor
+                .journal()
+                .record_batch(&batch, provenance.origin, provenance.folder)?;
+        }
         let outcomes = self.executor.apply(&batch, operations, on_collision)?;
         Ok(summarize(batch, &outcomes))
     }
@@ -184,7 +212,11 @@ impl Tidyfile {
         if operations.is_empty() {
             return Ok(nothing_happened());
         }
-        self.apply_batch(&operations, on_collision)
+        let provenance = Provenance {
+            origin: Origin::Watch,
+            folder: Some(root),
+        };
+        self.apply_batch(&operations, on_collision, provenance)
     }
 
     pub fn resolve_conflicts(
@@ -224,6 +256,8 @@ impl Tidyfile {
                 failed: summary.failed,
                 skipped: summary.skipped,
                 recorded_at: summary.recorded_at,
+                origin: summary.origin,
+                folder: summary.folder,
             })
             .collect())
     }
@@ -233,20 +267,72 @@ impl Tidyfile {
         rules: &[Rule],
         folders: &[PathBuf],
     ) -> Result<Vec<Operation>, ServiceError> {
-        let now = SystemTime::now();
         let mut operations = Vec::new();
-        for (index, (root, file)) in files_in(folders)?.into_iter().enumerate() {
-            let Some(facts) = plannable(&file, &root) else {
-                continue;
-            };
-            let context = PlanContext {
-                now,
-                counter: u32::try_from(index + 1).unwrap_or(u32::MAX),
-            };
+        for (facts, context) in plannable_files(folders)? {
             operations.extend(plan(rules, &facts, context)?);
         }
         Ok(operations)
     }
+}
+
+pub fn example_for_rule(
+    rule: &Rule,
+    earlier: &[Rule],
+    folders: &[PathBuf],
+) -> Result<RuleExample, ServiceError> {
+    let edited = [switched_on(rule)];
+    let mut taken_by = None;
+    for (facts, context) in plannable_files(folders)? {
+        let Some(first) = plan(&edited, &facts, context)?.into_iter().next() else {
+            continue;
+        };
+        let Some(taker) = first_taker(earlier, &facts, context)? else {
+            return Ok(RuleExample {
+                change: Some(describe(&first)),
+                taken_by: None,
+            });
+        };
+        taken_by.get_or_insert(taker);
+    }
+    Ok(RuleExample {
+        change: None,
+        taken_by,
+    })
+}
+
+fn switched_on(rule: &Rule) -> Rule {
+    Rule {
+        enabled: true,
+        ..rule.clone()
+    }
+}
+
+fn first_taker(
+    earlier: &[Rule],
+    facts: &FileFacts,
+    context: PlanContext,
+) -> Result<Option<String>, ServiceError> {
+    for rule in earlier.iter().filter(|rule| rule.enabled) {
+        if !plan(std::slice::from_ref(rule), facts, context)?.is_empty() {
+            return Ok(Some(rule.name.clone()));
+        }
+    }
+    Ok(None)
+}
+
+// WHY: the live example and the preview must number files alike, or {counter} would differ between them
+fn plannable_files(
+    folders: &[PathBuf],
+) -> Result<impl Iterator<Item = (FileFacts, PlanContext)>, ServiceError> {
+    let now = SystemTime::now();
+    let files = files_in(folders)?.into_iter().enumerate();
+    Ok(files.filter_map(move |(index, (root, file))| {
+        let context = PlanContext {
+            now,
+            counter: u32::try_from(index + 1).unwrap_or(u32::MAX),
+        };
+        plannable(&file, &root).map(|facts| (facts, context))
+    }))
 }
 
 fn plannable(file: &Path, root: &Path) -> Option<FileFacts> {
@@ -477,6 +563,292 @@ mod tests {
                 rename: None,
             }],
         }
+    }
+
+    fn named(name: &str, enabled: bool, mut rule: Rule) -> Rule {
+        rule.name = name.into();
+        rule.enabled = enabled;
+        rule
+    }
+
+    fn file_name_of(path: &str) -> String {
+        Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn the_example_is_the_first_file_the_rule_would_take() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a.pdf"), "a");
+        write(&root.path().join("b.pdf"), "b");
+
+        let example =
+            example_for_rule(&pdf_rule(out.path()), &[], &[root.path().to_path_buf()]).unwrap();
+
+        let change = example.change.unwrap();
+        assert_eq!(file_name_of(&change.source), "a.pdf");
+        assert_eq!(change.kind, "move");
+        assert_eq!(example.taken_by, None);
+    }
+
+    #[test]
+    fn an_earlier_rule_that_takes_the_file_is_named() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a.pdf"), "a");
+        let earlier = [named("Primera", true, pdf_rule(out.path()))];
+
+        let example = example_for_rule(
+            &pdf_rule(out.path()),
+            &earlier,
+            &[root.path().to_path_buf()],
+        )
+        .unwrap();
+
+        assert_eq!(example.change, None);
+        assert_eq!(example.taken_by.as_deref(), Some("Primera"));
+    }
+
+    #[test]
+    fn a_disabled_earlier_rule_does_not_take_the_example() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a.pdf"), "a");
+        let earlier = [named("Primera", false, pdf_rule(out.path()))];
+
+        let example = example_for_rule(
+            &pdf_rule(out.path()),
+            &earlier,
+            &[root.path().to_path_buf()],
+        )
+        .unwrap();
+
+        assert!(
+            example.change.is_some(),
+            "a switched-off rule took the file"
+        );
+        assert_eq!(example.taken_by, None);
+    }
+
+    #[test]
+    fn the_rule_counts_as_enabled_for_its_own_example() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a.pdf"), "a");
+        let edited = named("pdfs", false, pdf_rule(out.path()));
+
+        let example = example_for_rule(&edited, &[], &[root.path().to_path_buf()]).unwrap();
+
+        assert!(example.change.is_some());
+    }
+
+    #[test]
+    fn a_later_file_no_earlier_rule_takes_is_still_shown() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("a-invoice.pdf"), "a");
+        write(&root.path().join("b-manual.pdf"), "b");
+        let mut invoices = named("Primera", true, pdf_rule(out.path()));
+        invoices.conditions.push(Condition::NameContains {
+            text: "invoice".into(),
+        });
+
+        let example = example_for_rule(
+            &pdf_rule(out.path()),
+            &[invoices],
+            &[root.path().to_path_buf()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            file_name_of(&example.change.unwrap().source),
+            "b-manual.pdf"
+        );
+        assert_eq!(example.taken_by, None);
+    }
+
+    #[test]
+    fn no_match_gives_an_empty_example() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("notes.txt"), "text");
+
+        let example =
+            example_for_rule(&pdf_rule(out.path()), &[], &[root.path().to_path_buf()]).unwrap();
+
+        assert_eq!(
+            example,
+            RuleExample {
+                change: None,
+                taken_by: None
+            }
+        );
+    }
+
+    #[test]
+    fn the_example_matches_what_the_preview_shows() {
+        let root = watchable_folder();
+        write(&root.path().join("a-notes.txt"), "text");
+        write(&root.path().join("b-report.pdf"), "pdf");
+        let mut counted = pdf_rule(Path::new("/unused"));
+        counted.actions = vec![Action::RenameTo {
+            template: "{counter}.{ext}".into(),
+        }];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let example = example_for_rule(&counted, &[], &folders).unwrap();
+        let preview = service.simulate(&[counted], &folders).unwrap();
+
+        assert_eq!(example.change.as_ref(), preview.first());
+        assert_eq!(
+            file_name_of(&preview[0].destination.clone().unwrap()),
+            "2.pdf"
+        );
+    }
+
+    #[test]
+    fn an_invalid_pattern_is_reported_with_the_rule_name() {
+        let root = watchable_folder();
+        write(&root.path().join("a.pdf"), "a");
+        let mut broken = named("Facturas", true, pdf_rule(Path::new("/unused")));
+        broken.conditions = vec![Condition::NameMatchesRegex {
+            pattern: "(unclosed".into(),
+        }];
+
+        let outcome = example_for_rule(&broken, &[], &[root.path().to_path_buf()]);
+
+        assert!(matches!(
+            outcome,
+            Err(ServiceError::Rules(EvaluationError::Condition { ref rule, .. })) if rule == "Facturas"
+        ));
+    }
+
+    #[test]
+    fn a_forbidden_folder_is_refused() {
+        let system = PathBuf::from(if cfg!(windows) { r"C:\Windows" } else { "/usr" });
+
+        let outcome = example_for_rule(&pdf_rule(Path::new("/unused")), &[], &[system]);
+
+        assert!(matches!(
+            outcome,
+            Err(ServiceError::Folder(PathError::Forbidden))
+        ));
+    }
+
+    #[test]
+    fn the_example_touches_nothing() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        let source = root.path().join("a.pdf");
+        write(&source, "the original content");
+        let mut trashing = pdf_rule(out.path());
+        trashing.actions.push(Action::Trash);
+
+        let example = example_for_rule(&trashing, &[], &[root.path().to_path_buf()]).unwrap();
+
+        assert!(example.change.is_some());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "the original content");
+        assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_manual_run_is_recorded_as_manual() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("invoice.pdf"), "content");
+        let service = Tidyfile::in_memory().unwrap();
+
+        service
+            .organize(
+                &[pdf_rule(out.path())],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        let entry = &service.activity(10).unwrap()[0];
+        assert_eq!(entry.origin.as_deref(), Some("manual"));
+        assert_eq!(entry.folder, None);
+    }
+
+    #[test]
+    fn a_run_from_the_preview_is_recorded_as_manual() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("invoice.pdf"), "content");
+        let rules = [pdf_rule(out.path())];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+        let shown = service.simulate(&rules, &folders).unwrap();
+
+        service
+            .organize_as_shown(
+                &rules,
+                &folders,
+                Shown {
+                    changes: &shown,
+                    on_collision: Collision::Suffix,
+                },
+            )
+            .unwrap();
+
+        let entry = &service.activity(10).unwrap()[0];
+        assert_eq!(
+            (entry.origin.as_deref(), entry.folder.as_deref()),
+            (Some("manual"), None)
+        );
+    }
+
+    #[test]
+    fn a_watched_file_is_recorded_with_its_folder() {
+        let root = watchable_folder();
+        let out = watchable_folder();
+        let file = root.path().join("invoice.pdf");
+        write(&file, "content");
+        let service = Tidyfile::in_memory().unwrap();
+
+        service
+            .organize_file(
+                &[pdf_rule(out.path())],
+                root.path(),
+                &file,
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        let entry = &service.activity(10).unwrap()[0];
+        assert_eq!(entry.origin.as_deref(), Some("watch"));
+        assert_eq!(entry.folder.as_deref(), root.path().to_str());
+    }
+
+    #[test]
+    fn an_empty_run_records_no_batch() {
+        let data = tempfile::TempDir::new().unwrap();
+        let root = watchable_folder();
+        let out = watchable_folder();
+        write(&root.path().join("notes.txt"), "content");
+        let journal = data.path().join("journal.sqlite");
+        let service = Tidyfile::open(&journal).unwrap();
+
+        service
+            .organize(
+                &[pdf_rule(out.path())],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        let recorded: i64 = rusqlite::Connection::open(&journal)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM batches", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
+        assert!(service.activity(10).unwrap().is_empty());
     }
 
     #[test]

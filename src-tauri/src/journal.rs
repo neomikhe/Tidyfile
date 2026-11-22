@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS operations (
@@ -18,6 +18,31 @@ CREATE TABLE IF NOT EXISTS operations (
 );
 CREATE INDEX IF NOT EXISTS operations_by_batch ON operations(batch);
 CREATE INDEX IF NOT EXISTS operations_by_state ON operations(state);
+";
+
+const SCHEMA_V2: &str = "
+CREATE TABLE IF NOT EXISTS batches (
+    batch        TEXT    PRIMARY KEY,
+    origin       TEXT    NOT NULL CHECK (origin IN ('manual','watch')),
+    folder       TEXT,
+    recorded_at  INTEGER NOT NULL
+);
+";
+
+const RECENT_BATCHES: &str = "
+SELECT batch,
+       SUM(state = 'done'),
+       SUM(state = 'undone'),
+       SUM(state = 'failed'),
+       SUM(state = 'skipped'),
+       MAX(operations.recorded_at),
+       batches.origin,
+       batches.folder
+FROM operations LEFT JOIN batches USING (batch)
+WHERE batch NOT LIKE '%:undo'
+GROUP BY batch
+ORDER BY MAX(operations.recorded_at) DESC, batch DESC
+LIMIT ?1
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +119,21 @@ impl State {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Manual,
+    Watch,
+}
+
+impl Origin {
+    fn as_text(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Watch => "watch",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordedOperation {
     pub id: i64,
@@ -121,6 +161,26 @@ impl Journal {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&connection)?;
         Ok(Self { connection })
+    }
+
+    // WHY: a folder that is not UTF-8 only loses its label in Activity, never the batch itself
+    pub fn record_batch(
+        &self,
+        batch: &str,
+        origin: Origin,
+        folder: Option<&Path>,
+    ) -> Result<(), JournalError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO batches (batch, origin, folder, recorded_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                batch,
+                origin.as_text(),
+                folder.and_then(Path::to_str),
+                now_seconds()
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn record_planned(&self, batch: &str, operation: &Operation) -> Result<i64, JournalError> {
@@ -218,37 +278,31 @@ pub struct BatchSummary {
     pub failed: usize,
     pub skipped: usize,
     pub recorded_at: i64,
+    pub origin: Option<String>,
+    pub folder: Option<String>,
 }
 
 impl Journal {
     pub fn recent_batches(&self, limit: usize) -> Result<Vec<BatchSummary>, JournalError> {
-        let mut statement = self.connection.prepare(
-            "SELECT batch,
-                    SUM(state = 'done'),
-                    SUM(state = 'undone'),
-                    SUM(state = 'failed'),
-                    SUM(state = 'skipped'),
-                    MAX(recorded_at)
-             FROM operations
-             WHERE batch NOT LIKE '%:undo'
-             GROUP BY batch
-             ORDER BY MAX(recorded_at) DESC, batch DESC
-             LIMIT ?1",
-        )?;
+        let mut statement = self.connection.prepare(RECENT_BATCHES)?;
         let capped = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = statement.query_map([capped], |row| {
-            Ok(BatchSummary {
-                batch: row.get(0)?,
-                done: row.get::<_, i64>(1)?.max(0) as usize,
-                undone: row.get::<_, i64>(2)?.max(0) as usize,
-                failed: row.get::<_, i64>(3)?.max(0) as usize,
-                skipped: row.get::<_, i64>(4)?.max(0) as usize,
-                recorded_at: row.get(5)?,
-            })
-        })?;
+        let rows = statement.query_map([capped], read_summary)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(JournalError::from)
     }
+}
+
+fn read_summary(row: &rusqlite::Row) -> rusqlite::Result<BatchSummary> {
+    Ok(BatchSummary {
+        batch: row.get(0)?,
+        done: row.get::<_, i64>(1)?.max(0) as usize,
+        undone: row.get::<_, i64>(2)?.max(0) as usize,
+        failed: row.get::<_, i64>(3)?.max(0) as usize,
+        skipped: row.get::<_, i64>(4)?.max(0) as usize,
+        recorded_at: row.get(5)?,
+        origin: row.get(6)?,
+        folder: row.get(7)?,
+    })
 }
 
 type Row = (i64, String, String, String, Option<String>, String, i64);
@@ -313,8 +367,14 @@ fn migrate(connection: &Connection) -> Result<(), JournalError> {
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
-    connection.execute_batch(SCHEMA_V1)?;
-    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    let upgrade = connection.unchecked_transaction()?;
+    for (target, schema) in [(1, SCHEMA_V1), (2, SCHEMA_V2)] {
+        if version < target {
+            upgrade.execute_batch(schema)?;
+        }
+    }
+    upgrade.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    upgrade.commit()?;
     Ok(())
 }
 
@@ -339,6 +399,142 @@ mod tests {
             from: PathBuf::from(from),
             to: PathBuf::from(to),
         }
+    }
+
+    fn version_one(connection: &Connection) {
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+    }
+
+    fn insert_done_move(connection: &Connection, batch: &str, from: &str, to: &str) {
+        connection
+            .execute(
+                "INSERT INTO operations (batch, kind, source, destination, state, recorded_at)
+                 VALUES (?1, 'move', ?2, ?3, 'done', 1700000000)",
+                params![batch, from, to],
+            )
+            .unwrap();
+    }
+
+    fn only_summary(journal: &Journal) -> BatchSummary {
+        let mut summaries = journal.recent_batches(10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        summaries.remove(0)
+    }
+
+    #[test]
+    fn a_version_one_journal_upgrades_without_losing_anything() {
+        let connection = Connection::open_in_memory().unwrap();
+        version_one(&connection);
+        insert_done_move(&connection, "old-batch", "/a/x.pdf", "/b/x.pdf");
+
+        let journal = Journal::from_connection(connection).unwrap();
+
+        let summary = only_summary(&journal);
+        assert_eq!((summary.batch.as_str(), summary.done), ("old-batch", 1));
+        assert_eq!((summary.origin, summary.folder), (None, None));
+        assert_eq!(
+            journal.applied_in_batch("old-batch").unwrap()[0].operation,
+            move_operation("/a/x.pdf", "/b/x.pdf")
+        );
+        let version: i32 = journal
+            .connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn a_recorded_batch_reports_its_origin_and_folder() {
+        let journal = Journal::open_in_memory().unwrap();
+        journal
+            .record_batch("b1", Origin::Watch, Some(Path::new("/w/Downloads")))
+            .unwrap();
+        journal
+            .record_planned("b1", &move_operation("/w/Downloads/x.pdf", "/d/x.pdf"))
+            .unwrap();
+
+        let summary = only_summary(&journal);
+
+        assert_eq!(summary.origin.as_deref(), Some("watch"));
+        assert_eq!(summary.folder.as_deref(), Some("/w/Downloads"));
+    }
+
+    #[test]
+    fn recording_a_batch_twice_keeps_the_first() {
+        let journal = Journal::open_in_memory().unwrap();
+        journal
+            .record_batch("b1", Origin::Watch, Some(Path::new("/w")))
+            .unwrap();
+        journal.record_batch("b1", Origin::Manual, None).unwrap();
+        journal
+            .record_planned("b1", &move_operation("a", "b"))
+            .unwrap();
+
+        let summary = only_summary(&journal);
+
+        assert_eq!(
+            (summary.origin.as_deref(), summary.folder.as_deref()),
+            (Some("watch"), Some("/w"))
+        );
+    }
+
+    #[cfg(windows)]
+    fn unrecordable_folder() -> PathBuf {
+        use std::os::windows::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_wide(&[0x0077, 0xD800]))
+    }
+
+    #[cfg(unix)]
+    fn unrecordable_folder() -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(b"/w/caf\xe9".to_vec()))
+    }
+
+    #[test]
+    fn a_folder_that_is_not_utf8_is_recorded_without_it() {
+        let journal = Journal::open_in_memory().unwrap();
+        journal
+            .record_batch("b1", Origin::Watch, Some(&unrecordable_folder()))
+            .unwrap();
+        journal
+            .record_planned("b1", &move_operation("a", "b"))
+            .unwrap();
+
+        let summary = only_summary(&journal);
+
+        assert_eq!(
+            (summary.origin.as_deref(), summary.folder),
+            (Some("watch"), None)
+        );
+    }
+
+    #[test]
+    fn undo_still_works_after_the_upgrade() {
+        let data = tempfile::TempDir::new().unwrap();
+        let files = tempfile::TempDir::new().unwrap();
+        let source = files.path().join("invoice.pdf");
+        let moved = files.path().join("archive").join("invoice.pdf");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::write(&moved, "content").unwrap();
+        let path = data.path().join("journal.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        version_one(&connection);
+        insert_done_move(
+            &connection,
+            "old-batch",
+            source.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        );
+        drop(connection);
+
+        let service = crate::service::Tidyfile::open(&path).unwrap();
+        let report = service.undo("old-batch").unwrap();
+
+        assert_eq!(report.applied, 1);
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "content");
+        assert!(!moved.exists());
+        assert_eq!(service.activity(10).unwrap()[0].undone, 1);
     }
 
     #[test]

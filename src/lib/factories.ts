@@ -1,4 +1,5 @@
 import type { Action, Combinator, Condition, Rule } from "./ipc";
+import type { MessageKey } from "./i18n/index.svelte";
 
 export type ConditionType = Condition["type"];
 export type ActionType = Action["type"];
@@ -17,28 +18,35 @@ export const conditionTypes: ConditionType[] = [
 
 export const actionTypes: ActionType[] = ["moveTo", "copyTo", "renameTo", "trash"];
 
-export const conditionLabels: Record<ConditionType, string> = {
-  extension: "Extension is",
-  nameContains: "Name contains",
-  nameMatchesGlob: "Name matches pattern",
-  nameMatchesRegex: "Name matches regex",
-  largerThan: "Larger than",
-  smallerThan: "Smaller than",
-  olderThan: "Older than",
-  newerThan: "Newer than",
-  inSubfolder: "Inside subfolder",
+export const conditionLabels: Record<ConditionType, MessageKey> = {
+  extension: "condition.extension",
+  nameContains: "condition.nameContains",
+  nameMatchesGlob: "condition.nameMatchesGlob",
+  nameMatchesRegex: "condition.nameMatchesRegex",
+  largerThan: "condition.largerThan",
+  smallerThan: "condition.smallerThan",
+  olderThan: "condition.olderThan",
+  newerThan: "condition.newerThan",
+  inSubfolder: "condition.inSubfolder",
 };
 
-export const actionLabels: Record<ActionType, string> = {
-  moveTo: "Move to",
-  copyTo: "Copy to",
-  renameTo: "Rename",
-  trash: "Send to trash",
+export const actionLabels: Record<ActionType, MessageKey> = {
+  moveTo: "action.moveTo",
+  copyTo: "action.copyTo",
+  renameTo: "action.renameTo",
+  trash: "action.trash",
 };
 
-export const combinators: { value: Combinator; label: string }[] = [
-  { value: "all", label: "all of these" },
-  { value: "any", label: "any of these" },
+export const combinators: Combinator[] = ["all", "any"];
+
+export const PLACEHOLDERS: { token: string; label: MessageKey }[] = [
+  { token: "{name}", label: "chip.name" },
+  { token: "{ext}", label: "chip.ext" },
+  { token: "{date}", label: "chip.date" },
+  { token: "{year}", label: "chip.year" },
+  { token: "{month}", label: "chip.month" },
+  { token: "{day}", label: "chip.day" },
+  { token: "{counter}", label: "chip.counter" },
 ];
 
 export function blankCondition(type: ConditionType): Condition {
@@ -93,6 +101,12 @@ export function textToExtensions(text: string): string[] {
     .split(",")
     .map((piece) => piece.trim().replace(/^\./, ""))
     .filter((piece) => piece.length > 0);
+}
+
+export function logicChanged(before: Rule, after: Rule): boolean {
+  const logic = (rule: Rule): string =>
+    JSON.stringify([rule.combinator, rule.conditions, rule.actions]);
+  return logic(before) !== logic(after);
 }
 
 export function isIncomplete(rule: Rule): boolean {

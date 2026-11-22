@@ -18,6 +18,9 @@ import {
   resolveConflicts,
   folderStatus,
   watchedFolders,
+  exampleForRule,
+  type Language,
+  type RuleExample,
   type ActivityEntry,
   type Collision,
   type PlannedChange,
@@ -26,8 +29,13 @@ import {
   type RecordedChange,
   type Rule,
 } from "./ipc";
+import { describeError } from "./i18n/errors";
+import { applyLanguage } from "./i18n/index.svelte";
+import { isIncomplete, logicChanged } from "./factories";
 
-export type Status = { kind: "idle" } | { kind: "working" } | { kind: "problem"; message: string };
+export type SaveOutcome = "added" | "updated" | "deactivated";
+
+export type Status ={ kind: "idle" } | { kind: "working" } | { kind: "problem"; message: string };
 
 function flip(rule: Rule): Rule {
   return { ...rule, enabled: !rule.enabled };
@@ -39,12 +47,6 @@ function isPlanChanged(problem: unknown): boolean {
 
 type StoredFile = "rules" | "settings";
 
-function describe(error: unknown): string {
-  if (isIpcError(error)) {
-    return error.message;
-  }
-  return "Something went wrong. Please try again.";
-}
 
 type UndoNotices = Pick<BatchReport, "needsManualRestore" | "notInTrash" | "failed" | "alreadyGone">;
 
@@ -75,6 +77,8 @@ export class Workspace {
   previewChanged = $state(false);
   loadProblem = $state<string | null>(null);
   refusedFolder = $state<string | null>(null);
+  language = $state<Language>("auto");
+  deactivatedRule = $state<string | null>(null);
   private unreadable = $state<StoredFile[]>([]);
   private unlisten: UnlistenFn | null = null;
 
@@ -92,6 +96,7 @@ export class Workspace {
   }
 
   async initialise(): Promise<void> {
+    applyLanguage(this.language);
     await this.attempt(() => this.loadEverything());
     await this.refreshPreview();
     this.unlisten = await listen("tidied", () => {
@@ -113,7 +118,7 @@ export class Workspace {
       this.watched = await watchedFolders();
     });
     if (problems.length > 0) {
-      this.loadProblem = describe(problems[0]);
+      this.loadProblem = describeError(problems[0]);
       throw problems[0];
     }
   }
@@ -122,6 +127,8 @@ export class Workspace {
     const settings = await loadSettings();
     this.folders = settings.folders.filter((folder, index, all) => all.indexOf(folder) === index);
     this.onCollision = settings.onCollision;
+    this.language = settings.language ?? "auto";
+    applyLanguage(this.language);
     this.folderStates = await folderStatus(settings.folders);
   }
 
@@ -183,26 +190,55 @@ export class Workspace {
   }
 
   async toggle(id: string): Promise<void> {
+    this.deactivatedRule = null;
     await this.replace(this.rules.map((rule) => (rule.id === id ? flip(rule) : rule)));
   }
 
-  async add(rule: Rule): Promise<void> {
-    await this.replace([...this.rules, rule]);
+  async saveRule(draft: Rule, original: Rule | null): Promise<SaveOutcome> {
+    const outcome = this.outcomeOf(draft, original);
+    const saved = outcome === "updated" ? draft : { ...draft, enabled: false };
+    this.deactivatedRule = outcome === "deactivated" ? saved.name : null;
+    this.forgetPreview();
+    const rules =
+      original === null
+        ? [...this.rules, saved]
+        : this.rules.map((rule) => (rule.id === saved.id ? saved : rule));
+    await this.replace(rules);
+    return outcome;
   }
 
-  edit(edited: Rule): void {
-    this.rules = this.rules.map((rule) => (rule.id === edited.id ? edited : rule));
+  // WHY: CLAUDE.md §6.1 — an edited rule must be simulated again before the watcher may act on it
+  private outcomeOf(draft: Rule, original: Rule | null): SaveOutcome {
+    if (original === null) {
+      return "added";
+    }
+    const watching = this.watched.length > 0;
+    return original.enabled && watching && logicChanged(original, draft) ? "deactivated" : "updated";
+  }
+
+  async exampleFor(draft: Rule): Promise<RuleExample | null> {
+    if (this.folders.length === 0 || isIncomplete(draft)) {
+      return null;
+    }
+    const position = this.rules.findIndex((rule) => rule.id === draft.id);
+    const before = position === -1 ? this.rules : this.rules.slice(0, position);
+    try {
+      return await exampleForRule(draft, before.filter((rule) => rule.enabled), this.folders);
+    } catch {
+      return null;
+    }
+  }
+
+  async setLanguage(language: Language): Promise<void> {
+    this.language = language;
+    applyLanguage(language);
+    await this.rememberSettings();
+  }
+
+  private forgetPreview(): void {
     this.preview = null;
     this.lastRun = null;
     this.previewChanged = false;
-  }
-
-  async commit(): Promise<void> {
-    if (this.unreadable.includes("rules")) {
-      return;
-    }
-    await this.attempt(() => saveRules(this.rules));
-    await this.refreshPreview();
   }
 
   async remove(id: string): Promise<void> {
@@ -286,6 +322,7 @@ export class Workspace {
       folders: this.folders,
       watched: this.watched,
       onCollision: this.onCollision,
+      language: this.language,
     };
     await this.attempt(() => saveSettings(snapshot));
   }
@@ -400,7 +437,7 @@ export class Workspace {
       await work();
     } catch (error) {
       this.preview = null;
-      this.failure = describe(error);
+      this.failure = describeError(error);
     } finally {
       this.inFlight -= 1;
       if (this.inFlight === 0) {

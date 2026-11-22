@@ -29,6 +29,14 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 dunce = "1.0.5"
 tauri-plugin-dialog = "2.8"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_WindowsProgramming",
+] }
+
 [lints.rust]
 unsafe_code = "deny"
 

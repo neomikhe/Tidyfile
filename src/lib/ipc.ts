@@ -57,11 +57,13 @@ export type ErrorCode =
   | "rulesMalformed"
   | "watchFailed"
   | "planChanged"
+  | "invalidPattern"
   | "unavailable";
 
 export interface IpcError {
   code: ErrorCode;
   message: string;
+  detail?: string;
 }
 
 export function isIpcError(value: unknown): value is IpcError {
@@ -95,6 +97,8 @@ export interface ActivityEntry {
   failed: number;
   skipped: number;
   recordedAt: number;
+  origin: "manual" | "watch" | null;
+  folder: string | null;
 }
 
 export function loadRules(): Promise<Rule[]> {
@@ -127,10 +131,13 @@ export function settleInterrupted(): Promise<number> {
 
 export type Collision = "suffix" | "skip" | "ask";
 
+export type Language = "auto" | "es" | "en";
+
 export interface Settings {
   folders: string[];
   watched: string[];
   onCollision: Collision;
+  language: Language;
 }
 
 export function loadSettings(): Promise<Settings> {
@@ -164,6 +171,15 @@ export function resolveConflicts(batch: string, keepBoth: boolean): Promise<Batc
 
 export function checkPattern(kind: "glob" | "regex", pattern: string): Promise<void> {
   return invoke<void>("check_pattern", { kind, pattern });
+}
+
+export interface RuleExample {
+  change: PlannedChange | null;
+  takenBy: string | null;
+}
+
+export function exampleForRule(rule: Rule, earlier: Rule[], folders: string[]): Promise<RuleExample> {
+  return invoke<RuleExample>("example_for_rule", { rule, earlier, folders });
 }
 
 export interface FolderStatus {

@@ -6,10 +6,10 @@ use tauri::{AppHandle, State};
 
 use crate::executor::Collision;
 use crate::paths::PathError;
-use crate::rules::{Condition, FileFacts, Rule};
+use crate::rules::{Condition, EvaluationError, FileFacts, Rule};
 use crate::service::{
-    ActivityEntry, BatchReport, FolderStatus, PlannedChange, RecordedChange, ServiceError, Shown,
-    Tidyfile, statuses,
+    self, ActivityEntry, BatchReport, FolderStatus, PlannedChange, RecordedChange, RuleExample,
+    ServiceError, Shown, Tidyfile, statuses,
 };
 use crate::settings::Settings;
 use crate::store::{self, StoreError};
@@ -21,6 +21,8 @@ use std::time::SystemTime;
 pub struct IpcError {
     pub code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl IpcError {
@@ -28,6 +30,7 @@ impl IpcError {
         Self {
             code: code.to_owned(),
             message: message.to_owned(),
+            detail: None,
         }
     }
 
@@ -48,7 +51,19 @@ impl From<StoreError> for IpcError {
 
 impl From<ServiceError> for IpcError {
     fn from(error: ServiceError) -> Self {
-        Self::new(code_for(&error), &error.to_string())
+        Self {
+            detail: detail_for(&error),
+            ..Self::new(code_for(&error), &error.to_string())
+        }
+    }
+}
+
+fn detail_for(error: &ServiceError) -> Option<String> {
+    match error {
+        ServiceError::Rules(
+            EvaluationError::Condition { rule, .. } | EvaluationError::Template { rule, .. },
+        ) => Some(rule.clone()),
+        _ => None,
     }
 }
 
@@ -201,6 +216,18 @@ pub async fn check_pattern(kind: String, pattern: String) -> Result<(), IpcError
     .await
 }
 
+#[tauri::command]
+pub async fn example_for_rule(
+    rule: Rule,
+    earlier: Vec<Rule>,
+    folders: Vec<String>,
+) -> Result<RuleExample, IpcError> {
+    off_thread(move || {
+        service::example_for_rule(&rule, &earlier, &into_paths(folders)).map_err(IpcError::from)
+    })
+    .await
+}
+
 fn nothing_in_particular() -> FileFacts {
     FileFacts {
         path: PathBuf::from("sample.txt"),
@@ -320,6 +347,8 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::rules::ConditionError;
+    use crate::templates::TemplateError;
 
     #[test]
     fn a_forbidden_folder_maps_to_a_stable_code() {
@@ -349,6 +378,41 @@ mod tests {
 
         assert!(!error.message.contains('/'));
         assert!(!error.message.contains('\\'));
+    }
+
+    #[test]
+    fn a_rule_error_carries_the_rule_name() {
+        let error = IpcError::from(ServiceError::Rules(EvaluationError::Condition {
+            rule: "Facturas".into(),
+            source: ConditionError::InvalidRegex,
+        }));
+
+        assert_eq!(error.code, "invalidRule");
+        assert_eq!(error.detail.as_deref(), Some("Facturas"));
+    }
+
+    #[test]
+    fn a_template_error_carries_the_rule_name() {
+        let error = IpcError::from(ServiceError::Rules(EvaluationError::Template {
+            rule: "Capturas".into(),
+            source: TemplateError::PathTraversal,
+        }));
+
+        assert_eq!(error.detail.as_deref(), Some("Capturas"));
+    }
+
+    #[test]
+    fn other_errors_carry_no_detail() {
+        let error = IpcError::from(ServiceError::PlanChanged);
+
+        assert_eq!(error.detail, None);
+    }
+
+    #[test]
+    fn detail_is_left_out_of_the_json_when_absent() {
+        let json = serde_json::to_string(&IpcError::from(ServiceError::PlanChanged)).unwrap();
+
+        assert!(!json.contains("detail"), "unexpected detail in {json}");
     }
 
     #[test]

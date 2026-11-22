@@ -2,6 +2,7 @@ pub mod executor;
 pub mod ipc;
 pub mod journal;
 pub mod paths;
+pub mod recycle;
 pub mod rules;
 pub mod service;
 pub mod settings;
@@ -39,6 +40,7 @@ pub fn run() -> tauri::Result<()> {
             ipc::undo_operation,
             ipc::resolve_conflicts,
             ipc::check_pattern,
+            ipc::example_for_rule,
             ipc::folder_status,
             ipc::operations,
             ipc::start_watching,

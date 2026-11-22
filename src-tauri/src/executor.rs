@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::journal::{Journal, JournalError, Operation, RecordedOperation, State};
+use crate::recycle;
 
 const MAX_NAME_ATTEMPTS: u32 = 100;
 
@@ -22,6 +23,8 @@ enum ActionError {
     IncompleteCopy,
     #[error("every candidate name was already taken")]
     NoFreeName,
+    #[error("the Recycle Bin is not available on this drive")]
+    NoRecycleBin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -52,11 +55,23 @@ pub enum Outcome {
 
 pub struct Executor {
     journal: Journal,
+    has_recycle_bin: fn(&Path) -> bool,
 }
 
 impl Executor {
     pub fn new(journal: Journal) -> Self {
-        Self { journal }
+        Self {
+            journal,
+            has_recycle_bin: recycle::has_recycle_bin,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn judging_recycle_bin(journal: Journal, has_recycle_bin: fn(&Path) -> bool) -> Self {
+        Self {
+            journal,
+            has_recycle_bin,
+        }
     }
 
     pub fn journal(&self) -> &Journal {
@@ -71,8 +86,26 @@ impl Executor {
     ) -> Result<Vec<Outcome>, ExecutorError> {
         operations
             .iter()
-            .map(|operation| self.apply_one(batch, operation, on_collision))
+            .map(|operation| self.apply_planned(batch, operation, on_collision))
             .collect()
+    }
+
+    // WHY: Windows deletes for good where it keeps no Recycle Bin, yet still reports success
+    fn apply_planned(
+        &self,
+        batch: &str,
+        operation: &Operation,
+        on_collision: Collision,
+    ) -> Result<Outcome, ExecutorError> {
+        if self.would_be_lost(operation) && refuse_early(operation).is_none() {
+            let id = self.journal.record_planned(batch, operation)?;
+            return self.give_up(id, &ActionError::NoRecycleBin.to_string());
+        }
+        self.apply_one(batch, operation, on_collision)
+    }
+
+    fn would_be_lost(&self, operation: &Operation) -> bool {
+        matches!(operation, Operation::Trash { from } if !(self.has_recycle_bin)(from))
     }
 
     fn apply_one(
@@ -761,6 +794,88 @@ mod tests {
         } else {
             assert!(doomed.exists(), "the file was not restored from the trash");
         }
+    }
+
+    fn without_recycle_bin() -> Executor {
+        Executor::judging_recycle_bin(Journal::open_in_memory().unwrap(), |_| false)
+    }
+
+    #[test]
+    fn trashing_on_a_drive_without_recycle_bin_fails_and_keeps_the_file() {
+        let root = TempDir::new().unwrap();
+        let precious = root.path().join("precious.log");
+        write(&precious, "only copy");
+        let executor = without_recycle_bin();
+
+        let outcomes = executor
+            .apply(
+                "batch-1",
+                &[Operation::Trash {
+                    from: precious.clone(),
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcomes,
+            [Outcome::Failed(
+                "the Recycle Bin is not available on this drive".into()
+            )]
+        );
+        assert_eq!(fs::read_to_string(&precious).unwrap(), "only copy");
+        let recorded = executor.journal().operations_in_batch("batch-1").unwrap();
+        assert_eq!(recorded.len(), 1, "the refusal must show in the history");
+        assert_eq!(recorded[0].state, State::Failed);
+    }
+
+    #[test]
+    fn a_vanished_file_is_still_skipped_when_there_is_no_recycle_bin() {
+        let root = TempDir::new().unwrap();
+        let executor = without_recycle_bin();
+
+        let outcomes = executor
+            .apply(
+                "batch-1",
+                &[Operation::Trash {
+                    from: root.path().join("gone.log"),
+                }],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes, [Outcome::Skipped(SkipReason::SourceVanished)]);
+    }
+
+    #[test]
+    fn moves_and_undoing_a_copy_do_not_depend_on_the_recycle_bin_check() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("report.pdf");
+        let moved = root.path().join("moved/report.pdf");
+        let duplicate = root.path().join("backup/report.pdf");
+        write(&source, "content");
+        let executor = without_recycle_bin();
+        let copy = Operation::Copy {
+            from: source.clone(),
+            to: duplicate.clone(),
+        };
+
+        executor.apply("copy", &[copy], Collision::Suffix).unwrap();
+        executor.undo_batch("copy").unwrap();
+        let moving = Operation::Move {
+            from: source.clone(),
+            to: moved.clone(),
+        };
+        let outcomes = executor
+            .apply("move", &[moving], Collision::Suffix)
+            .unwrap();
+
+        assert!(
+            !duplicate.exists(),
+            "undoing our own copy keeps today's behaviour"
+        );
+        assert!(matches!(outcomes[0], Outcome::Applied(_)));
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "content");
     }
 
     #[test]

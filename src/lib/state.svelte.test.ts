@@ -3,7 +3,7 @@ import type { ActivityEntry, PlannedChange, Rule, Settings } from "./ipc";
 
 const backend = {
   rules: [] as Rule[],
-  settings: { folders: [], watched: [], onCollision: "suffix" } as Settings,
+  settings: { folders: [], watched: [], onCollision: "suffix", language: "auto" } as Settings,
   preview: [] as PlannedChange[],
   history: [] as ActivityEntry[],
   unfinished: [] as PlannedChange[],
@@ -20,6 +20,7 @@ const backend = {
   unreachable: [] as string[],
   forbidden: [] as string[],
   statusFails: false,
+  exampleCalls: [] as { rule: Rule; earlier: Rule[]; folders: string[] }[],
   report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 },
   gate: null as null | (() => void),
 };
@@ -117,6 +118,10 @@ vi.mock("./ipc", async (original) => {
     startWatching: vi.fn(async () => undefined),
     stopWatching: vi.fn(async () => undefined),
     watchedFolders: vi.fn(async () => backend.settings.watched),
+    exampleForRule: vi.fn(async (rule: Rule, earlier: Rule[], folders: string[]) => {
+      backend.exampleCalls.push({ rule, earlier, folders });
+      return { change: null, takenBy: null };
+    }),
     folderStatus: vi.fn(async (folders: string[]) => {
       if (backend.statusFails) {
         throw { code: "unavailable", message: "the folder could not be checked" };
@@ -130,7 +135,11 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => undefined),
 }));
 
+vi.stubGlobal("navigator", { language: "en-US" });
+
 const { Workspace } = await import("./state.svelte");
+const { i18n } = await import("./i18n/index.svelte");
+const { en } = await import("./i18n/en");
 
 function aRule(id: string, enabled: boolean): Rule {
   return {
@@ -144,8 +153,10 @@ function aRule(id: string, enabled: boolean): Rule {
 }
 
 beforeEach(() => {
+  i18n.locale = "en";
+  vi.stubGlobal("navigator", { language: "en-US" });
   backend.rules = [];
-  backend.settings = { folders: [], watched: [], onCollision: "suffix" };
+  backend.settings = { folders: [], watched: [], onCollision: "suffix", language: "auto" };
   backend.preview = [];
   backend.history = [];
   backend.unfinished = [];
@@ -162,6 +173,7 @@ beforeEach(() => {
   backend.unreachable = [];
   backend.forbidden = [];
   backend.statusFails = false;
+  backend.exampleCalls = [];
   backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
   backend.gate = null;
 });
@@ -169,7 +181,7 @@ beforeEach(() => {
 describe("startup", () => {
   test("loads rules, settings and unfinished work", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "skip" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "skip", language: "auto" };
     backend.unfinished = [{ kind: "move", source: "/a", destination: "/b" }];
     const workspace = new Workspace();
 
@@ -183,8 +195,8 @@ describe("startup", () => {
   });
 
   test("an unreadable rule file still lets the folders and history load", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask" };
-    backend.history = [{ batch: "b1", done: 1, undone: 0, failed: 0, skipped: 0, recordedAt: 1 }];
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask", language: "auto" };
+    backend.history = [{ batch: "b1", done: 1, undone: 0, failed: 0, skipped: 0, recordedAt: 1, origin: null, folder: null }];
     backend.failNext = { code: "rulesMalformed", message: "the rule file is not valid Tidyfile JSON" };
     const workspace = new Workspace();
 
@@ -193,21 +205,21 @@ describe("startup", () => {
     expect(workspace.folders).toEqual(["/watched"]);
     expect(workspace.onCollision).toBe("ask");
     expect(workspace.history).toHaveLength(1);
-    expect(workspace.loadProblem).toBe("the rule file is not valid Tidyfile JSON");
+    expect(workspace.loadProblem).toBe(en["error.rulesMalformed"]);
   });
 
   test("a rule file that could not be read is never overwritten, and the warning stays", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.failNext = { code: "rulesUnreachable", message: "the rule file could not be read or written" };
     const workspace = new Workspace();
     await workspace.initialise();
 
-    await workspace.add(aRule("new", true));
+    await workspace.saveRule(aRule("new", true), null);
     await workspace.refreshFolderStates();
 
     expect(backend.saved).toBe(0);
     expect(workspace.savesBlocked).toBe(true);
-    expect(workspace.loadProblem).toBe("the rule file could not be read or written");
+    expect(workspace.loadProblem).toBe(en["error.rulesUnreachable"]);
   });
 
   test("a malformed rule file can be replaced, since a copy was set aside", async () => {
@@ -215,7 +227,7 @@ describe("startup", () => {
     const workspace = new Workspace();
     await workspace.initialise();
 
-    await workspace.add(aRule("new", true));
+    await workspace.saveRule(aRule("new", true), null);
 
     expect(backend.saved).toBe(1);
     expect(workspace.savesBlocked).toBe(false);
@@ -234,7 +246,7 @@ describe("startup", () => {
 
   test("a fresh start shows what would change before anything can run", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.preview = [{ kind: "move", source: "/watched/a.pdf", destination: "/out/a.pdf" }];
     const workspace = new Workspace();
 
@@ -256,7 +268,7 @@ describe("running", () => {
 
   test("cannot run when every rule is disabled", async () => {
     backend.rules = [aRule("a", false)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -265,22 +277,31 @@ describe("running", () => {
 
   test("can run with a folder and an enabled rule", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
     expect(workspace.canRun).toBe(true);
   });
 
-  test("tidying is not offered while the preview is stale", async () => {
+  test("tidying is not offered while a saved rule's new preview is on its way", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
+    backend.preview = [{ kind: "move", source: "/a", destination: "/b" }];
     const workspace = new Workspace();
     await workspace.initialise();
+    expect(workspace.canRun).toBe(true);
+    backend.gate = () => undefined;
 
-    workspace.edit({ ...aRule("a", true), name: "renamed" });
+    const saving = workspace.saveRule({ ...aRule("a", true), name: "renamed" }, aRule("a", true));
+    await Promise.resolve();
+    await Promise.resolve();
 
+    expect(workspace.preview).toBeNull();
     expect(workspace.canRun).toBe(false);
+    backend.gate();
+    await saving;
+    expect(workspace.canRun).toBe(true);
   });
 
   test("only enabled rules are sent to the backend", async () => {
@@ -294,44 +315,15 @@ describe("running", () => {
 });
 
 describe("editing", () => {
-  test("editing does not save, so a keystroke costs no round trip", async () => {
+  test("saving a rule saves once and simulates once", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
-    const workspace = new Workspace();
-    await workspace.initialise();
-    const savesBefore = backend.saved;
-    const simulationsBefore = backend.simulated;
-
-    workspace.edit({ ...aRule("a", true), name: "renamed" });
-
-    expect(backend.saved).toBe(savesBefore);
-    expect(backend.simulated).toBe(simulationsBefore);
-    expect(workspace.rules[0]?.name).toBe("renamed");
-  });
-
-  test("editing invalidates the preview so a stale one is never shown", async () => {
-    backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
-    backend.preview = [{ kind: "move", source: "/a", destination: "/b" }];
-    const workspace = new Workspace();
-    await workspace.initialise();
-    await workspace.refreshPreview();
-    expect(workspace.preview).toHaveLength(1);
-
-    workspace.edit({ ...aRule("a", true), name: "renamed" });
-
-    expect(workspace.preview).toBeNull();
-  });
-
-  test("committing saves once and simulates once", async () => {
-    backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.saved = 0;
     backend.simulated = 0;
 
-    await workspace.commit();
+    await workspace.saveRule({ ...aRule("a", true), name: "renamed" }, aRule("a", true));
 
     expect(backend.saved).toBe(1);
     expect(backend.simulated).toBe(1);
@@ -360,6 +352,109 @@ describe("editing", () => {
   });
 });
 
+describe("editing rules", () => {
+  test("a new rule is saved switched off and at the end", async () => {
+    backend.rules = [aRule("a", true)];
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    const outcome = await workspace.saveRule(aRule("new", true), null);
+
+    expect(outcome).toBe("added");
+    expect(backend.rules.map((rule) => [rule.id, rule.enabled])).toEqual([
+      ["a", true],
+      ["new", false],
+    ]);
+  });
+
+  test("editing an active rule while watching switches it off and says so", async () => {
+    const original = { ...aRule("a", true), name: "Facturas" };
+    backend.rules = [original];
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    const draft = { ...original, conditions: [{ type: "extension" as const, anyOf: ["jpg"] }] };
+    const outcome = await workspace.saveRule(draft, original);
+
+    expect(outcome).toBe("deactivated");
+    expect(backend.rules[0]?.enabled).toBe(false);
+    expect(workspace.deactivatedRule).toBe("Facturas");
+  });
+
+  test("renaming an active rule while watching keeps it on", async () => {
+    const original = aRule("a", true);
+    backend.rules = [original];
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    const outcome = await workspace.saveRule({ ...original, name: "Otro nombre" }, original);
+
+    expect(outcome).toBe("updated");
+    expect(backend.rules[0]?.enabled).toBe(true);
+    expect(workspace.deactivatedRule).toBeNull();
+  });
+
+  test("editing an active rule with nothing watched keeps it on", async () => {
+    const original = aRule("a", true);
+    backend.rules = [original];
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    const draft = { ...original, combinator: "any" as const };
+    const outcome = await workspace.saveRule(draft, original);
+
+    expect(outcome).toBe("updated");
+    expect(backend.rules[0]?.enabled).toBe(true);
+  });
+
+  test("the example looks only at the active rules before this one", async () => {
+    backend.rules = [aRule("first", true), aRule("off", false), aRule("edited", true), aRule("after", true)];
+    backend.settings = { folders: ["/w"], watched: [], onCollision: "suffix", language: "auto" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.exampleFor(aRule("edited", true));
+    await workspace.exampleFor(aRule("brand-new", false));
+
+    expect(backend.exampleCalls.map((call) => call.earlier.map((rule) => rule.id))).toEqual([
+      ["first"],
+      ["first", "edited", "after"],
+    ]);
+    expect(backend.exampleCalls[0]?.folders).toEqual(["/w"]);
+  });
+
+  test("choosing a language saves it and applies it", async () => {
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.setLanguage("es");
+
+    expect(backend.settings.language).toBe("es");
+    expect(i18n.locale).toBe("es");
+  });
+
+  test("an unreadable settings file still follows the system language", async () => {
+    vi.stubGlobal("navigator", { language: "es-ES" });
+    backend.settingsUnreachable = true;
+    const workspace = new Workspace();
+
+    await workspace.initialise();
+
+    expect(i18n.locale).toBe("es");
+  });
+
+  test("a settings file without language starts as auto", async () => {
+    backend.settings = { folders: [], watched: [], onCollision: "suffix" } as unknown as Settings;
+    const workspace = new Workspace();
+
+    await workspace.initialise();
+
+    expect(workspace.language).toBe("auto");
+  });
+});
+
 describe("folders", () => {
   test("adding the same folder twice keeps one entry", async () => {
     const workspace = new Workspace();
@@ -372,7 +467,7 @@ describe("folders", () => {
   });
 
   test("removing a folder leaves the others", async () => {
-    backend.settings = { folders: ["/one", "/two"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/one", "/two"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -382,7 +477,7 @@ describe("folders", () => {
   });
 
   test("a folder that can never be used is refused when picked, and nothing is saved", async () => {
-    backend.settings = { folders: ["/downloads"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/downloads"], watched: [], onCollision: "suffix", language: "auto" };
     backend.preview = [{ kind: "move", source: "/downloads/a.pdf", destination: "/out/a.pdf" }];
     backend.forbidden = ["C:\\Windows"];
     const workspace = new Workspace();
@@ -426,11 +521,11 @@ describe("folders", () => {
 
     expect(workspace.folders).toEqual([]);
     expect(backend.settingsSaved).toBe(0);
-    expect(workspace.status).toEqual({ kind: "problem", message: "the folder could not be checked" });
+    expect(workspace.status).toEqual({ kind: "problem", message: en["error.unavailable"] });
   });
 
   test("a folder saved twice by an older version is shown once", async () => {
-    backend.settings = { folders: ["/one", "/one", "/two"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/one", "/one", "/two"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
 
     await workspace.initialise();
@@ -442,7 +537,7 @@ describe("folders", () => {
 describe("failures", () => {
   test("a backend error becomes a readable problem and clears the preview", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.failNext = { code: "forbiddenFolder", message: "this folder cannot be watched" };
@@ -451,13 +546,13 @@ describe("failures", () => {
 
     expect(workspace.status).toEqual({
       kind: "problem",
-      message: "this folder cannot be watched",
+      message: en["error.forbiddenFolder"],
     });
     expect(workspace.preview).toBeNull();
   });
 
   test("an unrecognised failure still yields a message rather than crashing", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.failNext = { code: 42, message: undefined } as never;
@@ -468,7 +563,7 @@ describe("failures", () => {
   });
 
   test("a later success clears the problem", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.failNext = { code: "folderNotFound", message: "gone" };
@@ -483,7 +578,7 @@ describe("failures", () => {
 
 describe("watching", () => {
   test("a folder can be watched on its own, leaving the others alone", async () => {
-    backend.settings = { folders: ["/one", "/two"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/one", "/two"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -495,7 +590,7 @@ describe("watching", () => {
   });
 
   test("unwatching the last folder stops watching altogether", async () => {
-    backend.settings = { folders: ["/one"], watched: ["/one"], onCollision: "suffix" };
+    backend.settings = { folders: ["/one"], watched: ["/one"], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -505,7 +600,7 @@ describe("watching", () => {
   });
 
   test("removing a folder also stops watching it", async () => {
-    backend.settings = { folders: ["/one", "/two"], watched: ["/one"], onCollision: "suffix" };
+    backend.settings = { folders: ["/one", "/two"], watched: ["/one"], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -518,7 +613,7 @@ describe("watching", () => {
 
 describe("folder status", () => {
   test("checking again notices a folder that went away while the app was open", async () => {
-    backend.settings = { folders: ["/usb"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/usb"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     expect(workspace.stateOf("/usb")).toBe("ok");
@@ -544,7 +639,7 @@ describe("collision policy", () => {
 
 describe("restoring from the trash", () => {
   test("an undo the system cannot do is reported, not swallowed", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.manualRestore = 2;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -555,7 +650,7 @@ describe("restoring from the trash", () => {
   });
 
   test("an undo that worked leaves no lingering notice", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.manualRestore = 0;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -566,7 +661,7 @@ describe("restoring from the trash", () => {
   });
 
   test("a file no longer in the trash is reported, not swallowed", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.notInTrash = 1;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -577,7 +672,7 @@ describe("restoring from the trash", () => {
   });
 
   test("a file that could not be put back is reported", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.undoFailed = 1;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -588,7 +683,7 @@ describe("restoring from the trash", () => {
   });
 
   test("a later clean undo clears the earlier notices", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.notInTrash = 1;
     backend.undoFailed = 1;
     const workspace = new Workspace();
@@ -603,7 +698,7 @@ describe("restoring from the trash", () => {
   });
 
   test("a file moved or deleted since is reported, not swallowed", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.alreadyGone = 2;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -614,7 +709,7 @@ describe("restoring from the trash", () => {
   });
 
   test("undoing a single file reports the same notices", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.notInTrash = 1;
     const workspace = new Workspace();
     await workspace.initialise();
@@ -625,7 +720,7 @@ describe("restoring from the trash", () => {
   });
 
   test("an undo that fails outright does not leave the previous notices behind", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.notInTrash = 1;
     backend.undoFailed = 1;
     backend.manualRestore = 1;
@@ -649,7 +744,7 @@ describe("restoring from the trash", () => {
 
 describe("what a run reports back", () => {
   test("the outcome is kept so the interface can show it", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
@@ -660,7 +755,7 @@ describe("what a run reports back", () => {
   });
 
   test("files left waiting for a decision are reported, not swallowed", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask", language: "auto" };
     backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
@@ -670,15 +765,15 @@ describe("what a run reports back", () => {
     expect(workspace.lastRun?.skipped).toBe(2);
   });
 
-  test("editing a rule clears a stale outcome", async () => {
+  test("saving a rule clears a stale outcome", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     await workspace.run();
     expect(workspace.lastRun).not.toBeNull();
 
-    workspace.edit({ ...aRule("a", true), name: "renamed" });
+    await workspace.saveRule({ ...aRule("a", true), name: "renamed" }, aRule("a", true));
 
     expect(workspace.lastRun).toBeNull();
   });
@@ -687,7 +782,7 @@ describe("what a run reports back", () => {
 describe("the preview is what runs", () => {
   test("a folder that changed since the preview is shown again instead of tidied", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const first = { kind: "move" as const, source: "/watched/a.pdf", destination: "/out/a.pdf" };
     backend.preview = [first];
     const workspace = new Workspace();
@@ -703,7 +798,7 @@ describe("the preview is what runs", () => {
 
   test("a second press runs what is now on screen", async () => {
     backend.rules = [aRule("a", true)];
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.preview = [{ kind: "trash", source: "/watched/new.pdf", destination: null }];
@@ -718,7 +813,7 @@ describe("the preview is what runs", () => {
 
 describe("two things happening at once", () => {
   test("the interface stays busy until the last one finishes", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -735,7 +830,7 @@ describe("two things happening at once", () => {
   });
 
   test("a failure during overlapping work is not erased by the other finishing", async () => {
-    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix" };
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     const workspace = new Workspace();
     await workspace.initialise();
     backend.failNext = { code: "folderNotFound", message: "gone" };
