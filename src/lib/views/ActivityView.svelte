@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { ActivityEntry, PlannedChange } from "../ipc";
+  import type { ActivityEntry, FailureReason, PlannedChange, RecordedChange } from "../ipc";
   import type { Workspace } from "../state.svelte";
-  import { batchCounts, groupByDay, knownFolderLabel } from "../present";
+  import { batchCounts, fileName, groupByDay, knownFolderLabel, showable } from "../present";
   import { formatTime, t, tn, type MessageKey } from "../i18n/index.svelte";
   import Toolbar from "../ui/Toolbar.svelte";
   import Group from "../ui/Group.svelte";
@@ -27,13 +27,17 @@
     return entry.folder === null ? t("origin.watchUnknown") : t("origin.watch", { folder: knownFolderLabel(entry.folder) });
   }
 
-  function fileName(path: string): string {
-    const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
-    return parts[parts.length - 1] ?? path;
-  }
-
   function kindLabel(change: PlannedChange): string {
     return t(kinds[change.kind] ?? "kind.move");
+  }
+
+  const reasons: Record<FailureReason, { label: MessageKey; hint: MessageKey }> = {
+    noRecycleBin: { label: "reason.noRecycleBin", hint: "reason.noRecycleBinHint" },
+    tooBigForRecycleBin: { label: "reason.tooBigForRecycleBin", hint: "reason.tooBigForRecycleBinHint" },
+  };
+
+  function stateLabel(change: RecordedChange): string {
+    return t(states[change.state] ?? "state.planned");
   }
 </script>
 
@@ -54,6 +58,9 @@
   {#if workspace.couldNotPutBack > 0}
     <Banner kind="info"><p>{tn("notice.couldNotPutBack", workspace.couldNotPutBack)}</p></Banner>
   {/if}
+  {#if workspace.notRecycled > 0}
+    <Banner kind="info"><p>{tn("notice.notRecycled", workspace.notRecycled)}</p></Banner>
+  {/if}
 
   {#if workspace.unfinished.length > 0}
     <Banner kind="problem">
@@ -62,7 +69,7 @@
         <p class="unfinished-row">
           <span class="tag {change.kind}">{kindLabel(change)}</span>
           <bdi>{fileName(change.source)}</bdi>
-          {#if change.destination !== null}<span class="muted">→ {change.destination}</span>{/if}
+          {#if change.destination !== null}<span class="muted">→ <bdi>{showable(change.destination)}</bdi></span>{/if}
         </p>
       {/each}
       <p><button onclick={() => workspace.acknowledgeUnfinished()}>{t("notice.dismiss")}</button></p>
@@ -99,12 +106,17 @@
         {#if expanded}
           {#each workspace.details as change (change.id)}
             <div class="row sub">
-              <bdi class="ellipsis file" title={change.source}>{fileName(change.source)}</bdi>
+              <bdi class="ellipsis file" title={showable(change.source)}>{fileName(change.source)}</bdi>
               <span class="muted" aria-hidden="true">→</span>
-              <span class="grow muted ellipsis tail" title={change.destination ?? ""}>
-                <bdi>{change.destination ?? t("kind.trash")}</bdi>
+              <span class="grow muted ellipsis tail" title={showable(change.destination ?? "")}>
+                <bdi>{change.destination === null ? t("kind.trash") : showable(change.destination)}</bdi>
               </span>
-              <span class="tag {change.state}">{t(states[change.state] ?? "state.planned")}</span>
+              <span class="tag {change.state}">{stateLabel(change)}</span>
+              {#if change.reason !== null}
+                {@const reason = reasons[change.reason]}
+                <span class="tag failed" title={t(reason.hint)}>{t(reason.label)}</span>
+                <span class="visually-hidden">{t(reason.hint)}</span>
+              {/if}
               <button class="link" disabled={!change.undoable || busy} onclick={() => workspace.revertOne(change.id)}>
                 {t("activity.undo")}
               </button>
@@ -125,8 +137,9 @@
   }
 
   .time {
-    width: 48px;
+    min-width: 64px;
     flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .counts {

@@ -1,13 +1,9 @@
 <script lang="ts">
   import type { RuleExample } from "../ipc";
   import { t } from "../i18n/index.svelte";
+  import { fileName, showable } from "../present";
 
   let { example }: { example: RuleExample } = $props();
-
-  function fileName(path: string): string {
-    const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
-    return parts[parts.length - 1] ?? path;
-  }
 </script>
 
 <div class="example" role="status">
@@ -18,7 +14,7 @@
       <span>{t("example.trash")}</span>
     {:else}
       <span>{t(example.change.kind === "copy" ? "example.copy" : "example.move")}</span>
-      <bdi class="strong path">{example.change.destination}</bdi>
+      <bdi class="strong path">{showable(example.change.destination ?? "")}</bdi>
     {/if}
   {:else if example.takenBy !== null}
     <span>{t("example.taken", { name: example.takenBy })}</span>

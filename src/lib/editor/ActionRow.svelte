@@ -2,7 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Action } from "../ipc";
   import { actionLabels, actionTypes, blankAction, type ActionType } from "../factories";
-  import { knownFolderLabel } from "../present";
+  import { knownFolderLabel, showable } from "../present";
   import { t } from "../i18n/index.svelte";
   import type { Platform } from "../platform";
   import Icon from "../ui/Icon.svelte";
@@ -46,8 +46,12 @@
     }
   }
 
+  function target(): HTMLInputElement | null {
+    return lastField?.isConnected ? lastField : defaultField;
+  }
+
   function insert(token: string): void {
-    const field = lastField ?? defaultField;
+    const field = target();
     if (field === null) {
       return;
     }
@@ -70,7 +74,7 @@
 
   {#if action.type === "moveTo" || action.type === "copyTo"}
     <Icon name="folder" />
-    <bdi class="grow ellipsis" title={action.folder}>
+    <bdi class="grow ellipsis" title={showable(action.folder)}>
       {action.folder.length > 0 ? knownFolderLabel(action.folder) : t("editor.noFolder")}
     </bdi>
     <button onclick={chooseFolder}>{t("editor.choose")}</button>
@@ -125,7 +129,7 @@
 {/if}
 
 {#if action.type !== "trash"}
-  <InsertChips enabled={(lastField ?? defaultField) !== null} oninsert={insert} />
+  <InsertChips enabled={target() !== null} oninsert={insert} />
 {/if}
 
 <style>

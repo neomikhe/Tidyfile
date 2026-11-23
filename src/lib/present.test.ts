@@ -4,13 +4,16 @@ import { i18n } from "./i18n/index.svelte";
 import {
   batchCounts,
   describeRule,
+  fileName,
   fromBytes,
   groupByDay,
   knownFolderLabel,
+  showable,
   toBytes,
   watchingLabel,
 } from "./present";
 import { detectPlatform } from "./platform";
+import { plain } from "./i18n/testing";
 
 function rule(changes: Partial<Rule>): Rule {
   return {
@@ -42,7 +45,7 @@ beforeEach(() => {
 
 describe("describeRule", () => {
   test("reads a rule as one sentence", () => {
-    expect(describeRule(invoices)).toBe("Nombre contiene «factura» y es PDF → Documentos › Facturas › {year}");
+    expect(plain(describeRule(invoices))).toBe("Nombre contiene «factura» y es PDF → Documentos › Facturas › {year}");
   });
 
   test("any joins the conditions with or", () => {
@@ -54,7 +57,7 @@ describe("describeRule", () => {
       ],
       actions: [{ type: "trash" }],
     });
-    expect(describeRule(loose)).toBe("Es MSI o EXE o tiene más de 30 días → Papelera");
+    expect(plain(describeRule(loose))).toBe("Es MSI o EXE o tiene más de 30 días → Papelera");
   });
 
   test("several actions are separated by a dot", () => {
@@ -62,12 +65,12 @@ describe("describeRule", () => {
       conditions: [{ type: "largerThan", bytes: 10 * 1024 * 1024 }],
       actions: [{ type: "copyTo", folder: "D:\\Backup" }, { type: "trash" }],
     });
-    expect(describeRule(both)).toBe("Pesa más de 10 MB → copia en Backup · Papelera");
+    expect(plain(describeRule(both))).toBe("Pesa más de 10 MB → copia en Backup · Papelera");
   });
 
   test("the same rule reads in English", () => {
     i18n.locale = "en";
-    expect(describeRule(invoices)).toBe("Name contains “factura” and is PDF → Documents › Facturas › {year}");
+    expect(plain(describeRule(invoices))).toBe("Name contains “factura” and is PDF → Documents › Facturas › {year}");
   });
 });
 
@@ -82,8 +85,20 @@ describe("folder names", () => {
 
   test("the watching label counts the folders", () => {
     expect(watchingLabel([])).toBe("Vigilancia apagada");
-    expect(watchingLabel(["D:\\Data\\Downloads"])).toBe("Vigilando Descargas");
+    expect(plain(watchingLabel(["D:\\Data\\Downloads"]))).toBe("Vigilando Descargas");
     expect(watchingLabel(["C:\\a", "D:\\b"])).toBe("Vigilando 2 carpetas");
+  });
+});
+
+describe("names on screen", () => {
+  test("a direction control inside a file name is shown instead of obeyed", () => {
+    expect(showable("factura\u202Efdp.exe")).toBe("factura[U+202E]fdp.exe");
+    expect(showable("informe año.pdf")).toBe("informe año.pdf");
+  });
+
+  test("the file name is the last part of the path, made showable", () => {
+    expect(fileName("D:\\Data\\Downloads\\a\u2066b.pdf")).toBe("a[U+2066]b.pdf");
+    expect(fileName("/home/u/notas")).toBe("notas");
   });
 });
 

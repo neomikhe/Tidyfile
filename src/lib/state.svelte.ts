@@ -32,6 +32,24 @@ import {
 import { describeError } from "./i18n/errors";
 import { applyLanguage } from "./i18n/index.svelte";
 import { isIncomplete, logicChanged } from "./factories";
+import { latestOnly } from "./latest";
+
+export type ExampleResult = RuleExample | "failed" | null;
+
+type ExampleRequest = { draft: Rule; earlier: Rule[]; folders: string[] };
+
+async function askForExample(request: ExampleRequest): Promise<RuleExample | "failed"> {
+  try {
+    return await exampleForRule(request.draft, request.earlier, request.folders);
+  } catch {
+    return "failed";
+  }
+}
+
+function bouncedFile(payload: unknown): string | null {
+  const file = (payload as { file?: unknown } | null)?.file;
+  return typeof file === "string" ? file : null;
+}
 
 export type SaveOutcome = "added" | "updated" | "deactivated";
 
@@ -48,13 +66,14 @@ function isPlanChanged(problem: unknown): boolean {
 type StoredFile = "rules" | "settings";
 
 
-type UndoNotices = Pick<BatchReport, "needsManualRestore" | "notInTrash" | "failed" | "alreadyGone">;
+type UndoNotices = Pick<BatchReport, "needsManualRestore" | "notInTrash" | "failed" | "alreadyGone" | "notRecycled">;
 
 const NOTHING_TO_REPORT: UndoNotices = {
   needsManualRestore: 0,
   notInTrash: 0,
   failed: 0,
   alreadyGone: 0,
+  notRecycled: 0,
 };
 
 export class Workspace {
@@ -73,6 +92,8 @@ export class Workspace {
   notInTrash = $state(0);
   couldNotPutBack = $state(0);
   alreadyGone = $state(0);
+  notRecycled = $state(0);
+  bouncing = $state<string[]>([]);
   lastRun = $state<BatchReport | null>(null);
   previewChanged = $state(false);
   private loadFailure = $state<{ error: unknown } | null>(null);
@@ -80,7 +101,10 @@ export class Workspace {
   language = $state<Language>("auto");
   deactivatedRule = $state<string | null>(null);
   private unreadable = $state<StoredFile[]>([]);
-  private unlisten: UnlistenFn | null = null;
+  watchingUnknown = $state(true);
+  private storedWatched: string[] = [];
+  private unlisten: UnlistenFn[] = [];
+  private example = latestOnly(askForExample);
 
   get enabledRules(): Rule[] {
     return this.rules.filter((rule) => rule.enabled);
@@ -99,9 +123,22 @@ export class Workspace {
     applyLanguage(this.language);
     await this.attempt(() => this.loadEverything());
     await this.refreshPreview();
-    this.unlisten = await listen("tidied", () => {
-      void this.afterAutomaticTidy();
-    });
+    this.unlisten = [
+      await listen("tidied", () => {
+        void this.afterAutomaticTidy();
+      }),
+      await listen("loopStopped", (event) => this.noteBouncing(bouncedFile(event.payload))),
+    ];
+  }
+
+  private noteBouncing(file: string | null): void {
+    if (file !== null && !this.bouncing.includes(file)) {
+      this.bouncing = [...this.bouncing, file];
+    }
+  }
+
+  dismissBouncing(): void {
+    this.bouncing = [];
   }
 
   private async loadEverything(): Promise<void> {
@@ -116,6 +153,7 @@ export class Workspace {
     });
     await this.settle(problems, null, async () => {
       this.watched = await watchedFolders();
+      this.watchingUnknown = false;
     });
     if (problems.length > 0) {
       this.loadFailure = { error: problems[0] };
@@ -128,6 +166,7 @@ export class Workspace {
     this.folders = settings.folders.filter((folder, index, all) => all.indexOf(folder) === index);
     this.onCollision = settings.onCollision;
     this.language = settings.language ?? "auto";
+    this.storedWatched = settings.watched;
     applyLanguage(this.language);
     this.folderStates = await folderStatus(settings.folders);
   }
@@ -165,8 +204,8 @@ export class Workspace {
   }
 
   dispose(): void {
-    this.unlisten?.();
-    this.unlisten = null;
+    this.unlisten.forEach((stop) => stop());
+    this.unlisten = [];
   }
 
   isWatched(folder: string): boolean {
@@ -174,6 +213,10 @@ export class Workspace {
   }
 
   async setWatched(folder: string, active: boolean): Promise<void> {
+    // WHY: starting watching replaces every running session, so an unknown list would silently drop some
+    if (this.watchingUnknown) {
+      return;
+    }
     const next = active
       ? [...this.watched, folder]
       : this.watched.filter((kept) => kept !== folder);
@@ -220,21 +263,17 @@ export class Workspace {
     if (original === null) {
       return "added";
     }
-    const watching = this.watched.length > 0;
+    const watching = this.watched.length > 0 || this.watchingUnknown;
     return original.enabled && watching && logicChanged(original, draft) ? "deactivated" : "updated";
   }
 
-  async exampleFor(draft: Rule): Promise<RuleExample | null> {
+  async exampleFor(draft: Rule): Promise<ExampleResult> {
     if (this.folders.length === 0 || isIncomplete(draft)) {
       return null;
     }
     const position = this.rules.findIndex((rule) => rule.id === draft.id);
     const before = position === -1 ? this.rules : this.rules.slice(0, position);
-    try {
-      return await exampleForRule(draft, before.filter((rule) => rule.enabled), this.folders);
-    } catch {
-      return null;
-    }
+    return this.example({ draft, earlier: before.filter((rule) => rule.enabled), folders: this.folders });
   }
 
   async setLanguage(language: Language): Promise<void> {
@@ -296,6 +335,9 @@ export class Workspace {
   }
 
   async removeFolder(folder: string): Promise<void> {
+    if (this.watchingUnknown) {
+      return;
+    }
     this.refusedFolder = null;
     this.folders = this.folders.filter((kept) => kept !== folder);
     if (this.isWatched(folder)) {
@@ -319,6 +361,10 @@ export class Workspace {
     const folders = this.folders;
     await this.attempt(async () => {
       this.folderStates = await folderStatus(folders);
+      if (this.watchingUnknown) {
+        this.watched = await watchedFolders();
+        this.watchingUnknown = false;
+      }
     });
   }
 
@@ -328,7 +374,7 @@ export class Workspace {
     }
     const snapshot = {
       folders: this.folders,
-      watched: this.watched,
+      watched: this.watchingUnknown ? this.storedWatched : this.watched,
       onCollision: this.onCollision,
       language: this.language,
     };
@@ -431,7 +477,8 @@ export class Workspace {
   private noteUndo(report: UndoNotices): void {
     this.manualRestore = report.needsManualRestore;
     this.notInTrash = report.notInTrash;
-    this.couldNotPutBack = report.failed;
+    this.notRecycled = report.notRecycled;
+    this.couldNotPutBack = Math.max(report.failed - report.notRecycled, 0);
     this.alreadyGone = report.alreadyGone;
   }
 

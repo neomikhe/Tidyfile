@@ -59,6 +59,11 @@ export const en: Messages = {
     one: "{count} could not be done; Activity has the details.",
     other: "{count} could not be done; Activity has the details.",
   },
+  "run.notRecycled": {
+    one: "{count} was left untouched: it would have been deleted for good, because its drive has no Trash or the file does not fit in it.",
+    other:
+      "{count} were left untouched: they would have been deleted for good, because their drive has no Trash or the files do not fit in it.",
+  },
 
   "join.and": " and ",
   "join.or": " or ",
@@ -106,6 +111,7 @@ export const en: Messages = {
   "editor.trashNoteMac": "Goes to the Trash; to bring it back, use Put Back in the Finder Trash.",
   "editor.patternInvalid": "This pattern is not valid.",
   "editor.incompleteHint": "Finish the rule to be able to save it.",
+  "editor.savesBlocked": "Saving is off while the rules file cannot be read.",
   "editor.delete": "Delete rule",
   "editor.deleteConfirm": "Delete the “{name}” rule?",
   "editor.deleteYes": "Delete",
@@ -147,6 +153,7 @@ export const en: Messages = {
   "example.trash": "would go to the Trash",
   "example.none": "Right now no file in your folders matches this rule.",
   "example.taken": "Files that match this rule are taken first by the “{name}” rule.",
+  "example.failed": "No example can be worked out for this draft. Check the patterns and the new name.",
 
   "activity.title": "Activity",
   "activity.subtitle": "Every batch can be undone",
@@ -174,6 +181,17 @@ export const en: Messages = {
   "state.failed": "Failed",
   "state.skipped": "Skipped",
   "state.planned": "Pending",
+  "reason.noRecycleBin": "No Trash",
+  "reason.noRecycleBinHint":
+    "This drive has no Trash (network, removable or turned off), or it could not be checked. Tidyfile does not hand anything to a Trash that cannot keep it, so it left this alone.",
+  "reason.tooBigForRecycleBin": "Too big for the Trash",
+  "reason.tooBigForRecycleBinHint":
+    "It is bigger than its drive's Trash and Windows would delete it for good, so Tidyfile left it alone.",
+  "loop.stopped": {
+    one: "Tidyfile stopped moving {files}: your rules kept moving it again and again. Check the rules for your watched folders.",
+    other:
+      "Tidyfile stopped moving {count} files ({files}): your rules kept moving them again and again. Check the rules for your watched folders.",
+  },
 
   "notice.manualRestore": {
     one: "{count} file could not be brought back from the Trash automatically: this system does not allow it. Open the Trash and use Put Back.",
@@ -193,6 +211,11 @@ export const en: Messages = {
     one: "{count} file could not be put back. Nothing was overwritten: close any program that is using it, or move away the file that now has its name, then undo again.",
     other:
       "{count} files could not be put back. Nothing was overwritten: close any program that is using them, or move away the files that now have their names, then undo again.",
+  },
+  "notice.notRecycled": {
+    one: "{count} file could not be undone: it would have been deleted for good, because its drive has no Trash or it does not fit in it. It is still where it was; delete it yourself if you no longer want it.",
+    other:
+      "{count} files could not be undone: they would have been deleted for good, because their drive has no Trash or they do not fit in it. They are still where they were; delete them yourself if you no longer want them.",
   },
   "notice.unfinished": {
     one: "{count} operation never finished.",

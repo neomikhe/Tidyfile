@@ -2,7 +2,7 @@
   import type { PlannedChange, Rule } from "../ipc";
   import type { Workspace } from "../state.svelte";
   import { isIncomplete } from "../factories";
-  import { describeRule } from "../present";
+  import { describeRule, fileName, showable } from "../present";
   import { t, tn, type MessageKey } from "../i18n/index.svelte";
   import Toolbar from "../ui/Toolbar.svelte";
   import Group from "../ui/Group.svelte";
@@ -26,18 +26,13 @@
     return workspace.preview === null ? "rules.tidyNoPreview" : null;
   }
 
-  function fileName(path: string): string {
-    const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
-    return parts[parts.length - 1] ?? path;
-  }
-
   function kindLabel(change: PlannedChange): string {
     return t(kinds[change.kind] ?? "kind.move");
   }
 </script>
 
 <Toolbar title={t("rules.title")}>
-  <button onclick={() => onedit(null)}>{t("rules.new")}</button>
+  <button data-new-rule onclick={() => onedit(null)}>{t("rules.new")}</button>
   <button
     class="primary"
     disabled={!workspace.canRun}
@@ -66,7 +61,8 @@
         {:else}
           {tn("run.tidied", run.applied)}
           {#if run.skipped > 0}{tn("run.skipped", run.skipped)}{/if}
-          {#if run.failed > 0}{tn("run.failed", run.failed)}{/if}
+          {#if run.failed > run.notRecycled}{tn("run.failed", run.failed - run.notRecycled)}{/if}
+          {#if run.notRecycled > 0}{tn("run.notRecycled", run.notRecycled)}{/if}
         {/if}
       </p>
     </Banner>
@@ -130,10 +126,10 @@
       {#each workspace.preview as change, index (index)}
         <div class="row">
           <span class="tag {change.kind}">{kindLabel(change)}</span>
-          <bdi class="file ellipsis" title={change.source}>{fileName(change.source)}</bdi>
+          <bdi class="file ellipsis" title={showable(change.source)}>{fileName(change.source)}</bdi>
           {#if change.destination !== null}
             <span class="muted" aria-hidden="true">→</span>
-            <span class="muted ellipsis tail" title={change.destination}><bdi>{change.destination}</bdi></span>
+            <span class="muted ellipsis tail" title={showable(change.destination)}><bdi>{showable(change.destination)}</bdi></span>
           {/if}
         </div>
       {/each}

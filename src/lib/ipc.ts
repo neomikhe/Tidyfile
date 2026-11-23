@@ -44,7 +44,10 @@ export interface BatchReport {
   needsManualRestore: number;
   notInTrash: number;
   alreadyGone: number;
+  notRecycled: number;
 }
+
+export type FailureReason = "noRecycleBin" | "tooBigForRecycleBin";
 
 export type ErrorCode =
   | "forbiddenFolder"
@@ -155,6 +158,7 @@ export interface RecordedChange {
   destination: string | null;
   state: string;
   undoable: boolean;
+  reason: FailureReason | null;
 }
 
 export function operations(batch: string): Promise<RecordedChange[]> {

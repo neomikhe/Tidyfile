@@ -19,10 +19,23 @@ function lastSegment(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+const DIRECTION_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/g;
+
+export function showable(text: string): string {
+  return text.replace(DIRECTION_CONTROLS, (control) => {
+    const code = (control.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0");
+    return `[U+${code}]`;
+  });
+}
+
+export function fileName(path: string): string {
+  return showable(lastSegment(path));
+}
+
 export function knownFolderLabel(path: string): string {
   const name = lastSegment(path);
   const key = KNOWN_FOLDERS[name.toLowerCase()];
-  return key ? t(key) : name;
+  return key ? t(key) : showable(name);
 }
 
 export function watchingLabel(watched: string[]): string {

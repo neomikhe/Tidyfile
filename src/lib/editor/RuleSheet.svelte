@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkPattern, type Action, type Combinator, type Condition, type Rule, type RuleExample as Example } from "../ipc";
+  import { checkPattern, type Action, type Combinator, type Condition, type Rule } from "../ipc";
   import { blankAction, blankCondition, blankRule, combinators, isIncomplete } from "../factories";
   import { t } from "../i18n/index.svelte";
   import { detectPlatform } from "../platform";
-  import type { Workspace } from "../state.svelte";
+  import type { ExampleResult, Workspace } from "../state.svelte";
   import ConditionRow from "./ConditionRow.svelte";
   import ActionRow from "./ActionRow.svelte";
   import RuleExample from "./RuleExample.svelte";
@@ -19,10 +19,10 @@
   let actionRows = $state(keyed(initial.actions));
   let problems = $state<Record<number, boolean>>({});
   let confirmingDelete = $state(false);
-  let example = $state<Example | null>(null);
+  let example = $state<ExampleResult>(null);
   const platform = detectPlatform(globalThis.navigator?.userAgent ?? "");
   const opener = typeof document === "undefined" ? null : document.activeElement;
-  const blocked = $derived(isIncomplete(draft) || hasProblem(conditionRows, problems));
+  const blocked = $derived(isIncomplete(draft) || hasProblem(conditionRows, problems) || workspace.savesBlocked);
 
   function startingDraft(): Rule {
     return rule === null ? { ...blankRule(), name: t("editor.newTitle") } : $state.snapshot(rule);
@@ -32,10 +32,11 @@
 
   $effect(() => {
     const snapshot = $state.snapshot(draft);
+    const history = workspace.history;
     let current = true;
     const timer = setTimeout(async () => {
       const found = await workspace.exampleFor(snapshot);
-      if (current) example = found;
+      if (current && history === workspace.history) example = found;
     }, 400);
     return () => {
       current = false;
@@ -44,7 +45,8 @@
   });
 
   function closed(): void {
-    if (opener instanceof HTMLElement) opener.focus();
+    const back = opener instanceof HTMLElement && opener.isConnected ? opener : null;
+    (back ?? document.querySelector<HTMLElement>("[data-new-rule]"))?.focus();
     onclose();
   }
 
@@ -129,7 +131,9 @@
     {/each}
   </div>
 
-  {#if example !== null}
+  {#if example === "failed"}
+    <p class="muted example-failed" role="status">{t("example.failed")}</p>
+  {:else if example !== null}
     <RuleExample {example} />
   {/if}
 
@@ -137,14 +141,18 @@
     {#if rule !== null}
       {#if confirmingDelete}
         <span class="confirm">{t("editor.deleteConfirm", { name: rule.name })}</span>
-        <button class="danger" onclick={remove}>{t("editor.deleteYes")}</button>
+        <button class="danger" disabled={workspace.savesBlocked} onclick={remove}>{t("editor.deleteYes")}</button>
         <button onclick={() => (confirmingDelete = false)}>{t("editor.deleteNo")}</button>
       {:else}
-        <button class="danger" onclick={() => (confirmingDelete = true)}>{t("editor.delete")}</button>
+        <button class="danger" disabled={workspace.savesBlocked} onclick={() => (confirmingDelete = true)}>
+          {t("editor.delete")}
+        </button>
       {/if}
     {/if}
     <span class="grow"></span>
-    {#if blocked}
+    {#if workspace.savesBlocked}
+      <span class="muted">{t("editor.savesBlocked")}</span>
+    {:else if blocked}
       <span class="muted">{t("editor.incompleteHint")}</span>
     {/if}
     <button onclick={() => dialog?.close()}>{t("editor.cancel")}</button>
@@ -227,5 +235,9 @@
 
   .confirm {
     font-weight: 600;
+  }
+
+  .example-failed {
+    margin: 12px 0 0;
   }
 </style>

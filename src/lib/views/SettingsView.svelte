@@ -2,7 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { Collision, Language } from "../ipc";
   import type { Workspace } from "../state.svelte";
-  import { knownFolderLabel } from "../present";
+  import { knownFolderLabel, showable } from "../present";
   import { t, type MessageKey } from "../i18n/index.svelte";
   import Toolbar from "../ui/Toolbar.svelte";
   import Group from "../ui/Group.svelte";
@@ -50,16 +50,21 @@
           {:else if state === "forbidden"}
             <span class="tag failed">{t("settings.forbidden")}</span>
           {/if}
-          <div class="muted ellipsis" title={folder}><bdi>{folder}</bdi></div>
+          <div class="muted ellipsis" title={showable(folder)}><bdi>{showable(folder)}</bdi></div>
         </div>
         <span class="muted">{t("settings.watch")}</span>
         <Switch
           checked={workspace.isWatched(folder)}
           label={t("settings.watchLabel", { folder: name })}
-          disabled={workspace.status.kind === "working" || state === "forbidden"}
+          disabled={workspace.status.kind === "working" || state === "forbidden" || workspace.watchingUnknown}
           onchange={(checked) => workspace.setWatched(folder, checked)}
         />
-        <button class="link" aria-label={t("settings.removeLabel", { folder: name })} onclick={() => workspace.removeFolder(folder)}>
+        <button
+          class="link"
+          aria-label={t("settings.removeLabel", { folder: name })}
+          disabled={workspace.watchingUnknown}
+          onclick={() => workspace.removeFolder(folder)}
+        >
           {t("settings.remove")}
         </button>
       </div>
@@ -72,7 +77,7 @@
 
   {#if workspace.refusedFolder !== null}
     <Banner kind="problem">
-      <p><bdi class="name">{workspace.refusedFolder}</bdi> {t("settings.refusedRest")}</p>
+      <p><bdi class="name">{showable(workspace.refusedFolder)}</bdi> {t("settings.refusedRest")}</p>
     </Banner>
   {/if}
   <p class="note">{t("settings.watchNote")}</p>

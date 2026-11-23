@@ -21,9 +21,15 @@ const backend = {
   forbidden: [] as string[],
   statusFails: false,
   exampleCalls: [] as { rule: Rule; earlier: Rule[]; folders: string[] }[],
-  report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 },
+  report: { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0, notRecycled: 0 },
   gate: null as null | (() => void),
+  notRecycled: 0,
+  watchedFails: false,
+  exampleFails: false,
+  watchStarts: 0,
 };
+
+const listeners: Record<string, (event: { payload: unknown }) => void> = {};
 
 function waitAtGate(): Promise<void> {
   return new Promise((resolve) => {
@@ -100,6 +106,7 @@ vi.mock("./ipc", async (original) => {
       needsManualRestore: backend.manualRestore,
       notInTrash: backend.notInTrash,
       alreadyGone: backend.alreadyGone,
+      notRecycled: backend.notRecycled,
       };
     }),
     undoOperation: vi.fn(async () => ({
@@ -110,16 +117,27 @@ vi.mock("./ipc", async (original) => {
       needsManualRestore: 0,
       notInTrash: backend.notInTrash,
       alreadyGone: backend.alreadyGone,
+      notRecycled: backend.notRecycled,
     })),
     operations: vi.fn(async () => []),
     activity: vi.fn(async () => backend.history),
     interrupted: vi.fn(async () => backend.unfinished),
     settleInterrupted: vi.fn(async () => backend.unfinished.length),
-    startWatching: vi.fn(async () => undefined),
+    startWatching: vi.fn(async () => {
+      backend.watchStarts += 1;
+    }),
     stopWatching: vi.fn(async () => undefined),
-    watchedFolders: vi.fn(async () => backend.settings.watched),
+    watchedFolders: vi.fn(async () => {
+      if (backend.watchedFails) {
+        throw { code: "unavailable", message: "the service is busy" };
+      }
+      return backend.settings.watched;
+    }),
     exampleForRule: vi.fn(async (rule: Rule, earlier: Rule[], folders: string[]) => {
       backend.exampleCalls.push({ rule, earlier, folders });
+      if (backend.exampleFails) {
+        throw { code: "invalidRule", message: "a rule could not be evaluated", detail: rule.name };
+      }
       return { change: null, takenBy: null };
     }),
     folderStatus: vi.fn(async (folders: string[]) => {
@@ -132,7 +150,10 @@ vi.mock("./ipc", async (original) => {
 });
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => undefined),
+  listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+    listeners[name] = handler;
+    return () => undefined;
+  }),
 }));
 
 vi.stubGlobal("navigator", { language: "en-US" });
@@ -175,8 +196,12 @@ beforeEach(() => {
   backend.forbidden = [];
   backend.statusFails = false;
   backend.exampleCalls = [];
-  backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
+  backend.report = { batch: "b1", applied: 1, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0, notRecycled: 0 };
   backend.gate = null;
+  backend.notRecycled = 0;
+  backend.watchedFails = false;
+  backend.exampleFails = false;
+  backend.watchStarts = 0;
 });
 
 describe("startup", () => {
@@ -395,6 +420,86 @@ describe("editing rules", () => {
     expect(outcome).toBe("updated");
     expect(backend.rules[0]?.enabled).toBe(true);
     expect(workspace.deactivatedRule).toBeNull();
+  });
+
+  test("editing an active rule is treated as watching when that could not be checked", async () => {
+    const original = aRule("a", true);
+    backend.rules = [original];
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    backend.watchedFails = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    const outcome = await workspace.saveRule({ ...original, combinator: "any" }, original);
+
+    expect(outcome).toBe("deactivated");
+    expect(backend.rules[0]?.enabled).toBe(false);
+  });
+
+  test("until watching has been read it counts as unknown, so an edit at startup cannot skip the dry run", async () => {
+    const workspace = new Workspace();
+    expect(workspace.watchingUnknown).toBe(true);
+
+    await workspace.initialise();
+
+    expect(workspace.watchingUnknown).toBe(false);
+  });
+
+  test("watching that could not be read is checked again with the folders", async () => {
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    backend.watchedFails = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+    expect(workspace.watchingUnknown).toBe(true);
+
+    backend.watchedFails = false;
+    await workspace.refreshFolderStates();
+
+    expect(workspace.watchingUnknown).toBe(false);
+    expect(workspace.watched).toEqual(["/w"]);
+  });
+
+  test("settings saved while watching is unknown keep the folders that were being watched", async () => {
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    backend.watchedFails = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.setCollision("skip");
+
+    expect(backend.settings.watched).toEqual(["/w"]);
+  });
+
+  test("a folder cannot be removed while watching is unknown, since its watching could not be stopped", async () => {
+    backend.settings = { folders: ["/w"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    backend.watchedFails = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.removeFolder("/w");
+
+    expect(workspace.folders).toEqual(["/w"]);
+  });
+
+  test("while watching is unknown a folder cannot be switched, so the running ones are not replaced", async () => {
+    backend.settings = { folders: ["/w", "/x"], watched: ["/w"], onCollision: "suffix", language: "auto" };
+    backend.watchedFails = true;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.setWatched("/x", true);
+
+    expect(backend.watchStarts).toBe(0);
+  });
+
+  test("an example that cannot be worked out says so instead of vanishing", async () => {
+    backend.rules = [aRule("a", true)];
+    backend.settings = { folders: ["/w"], watched: [], onCollision: "suffix", language: "auto" };
+    const workspace = new Workspace();
+    await workspace.initialise();
+    backend.exampleFails = true;
+
+    expect(await workspace.exampleFor(aRule("a", true))).toBe("failed");
   });
 
   test("editing an active rule with nothing watched keeps it on", async () => {
@@ -705,6 +810,31 @@ describe("restoring from the trash", () => {
     expect(workspace.couldNotPutBack).toBe(1);
   });
 
+  test("a copy kept because its drive has no usable Recycle Bin is told apart from other failures", async () => {
+    backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
+    backend.undoFailed = 3;
+    backend.notRecycled = 2;
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    await workspace.revert("b1");
+
+    expect([workspace.notRecycled, workspace.couldNotPutBack]).toEqual([2, 1]);
+  });
+
+  test("a file bouncing between watched folders is reported once until dismissed", async () => {
+    const workspace = new Workspace();
+    await workspace.initialise();
+
+    listeners["loopStopped"]?.({ payload: { file: "rebote.txt" } });
+    listeners["loopStopped"]?.({ payload: { file: "rebote.txt" } });
+    listeners["loopStopped"]?.({ payload: { file: 42 } });
+
+    expect(workspace.bouncing).toEqual(["rebote.txt"]);
+    workspace.dismissBouncing();
+    expect(workspace.bouncing).toEqual([]);
+  });
+
   test("a later clean undo clears the earlier notices", async () => {
     backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
     backend.notInTrash = 1;
@@ -768,7 +898,7 @@ describe("restoring from the trash", () => {
 describe("what a run reports back", () => {
   test("the outcome is kept so the interface can show it", async () => {
     backend.settings = { folders: ["/watched"], watched: [], onCollision: "suffix", language: "auto" };
-    backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
+    backend.report = { batch: "b1", applied: 3, skipped: 0, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0, notRecycled: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
 
@@ -779,7 +909,7 @@ describe("what a run reports back", () => {
 
   test("files left waiting for a decision are reported, not swallowed", async () => {
     backend.settings = { folders: ["/watched"], watched: [], onCollision: "ask", language: "auto" };
-    backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0 };
+    backend.report = { batch: "b1", applied: 0, skipped: 2, failed: 0, needsManualRestore: 0, notInTrash: 0, alreadyGone: 0, notRecycled: 0 };
     const workspace = new Workspace();
     await workspace.initialise();
 

@@ -33,10 +33,15 @@ export function applyLanguage(language: Language): void {
   }
 }
 
+function isolated(value: string | number): string {
+  return typeof value === "string" ? `⁨${value}⁩` : String(value);
+}
+
 function fill(text: string, params: Params = {}): string {
-  return text.replace(/\{(\w+)\}/g, (whole: string, name: string) =>
-    name in params ? String(params[name]) : whole,
-  );
+  return text.replace(/\{(\w+)\}/g, (whole: string, name: string) => {
+    const value = params[name];
+    return value === undefined ? whole : isolated(value);
+  });
 }
 
 export function t(key: MessageKey, params?: Params): string {
@@ -46,7 +51,7 @@ export function t(key: MessageKey, params?: Params): string {
 export function tn(key: PluralKey, count: number, params: Params = {}): string {
   const forms = catalogs[i18n.locale][key] as Plural;
   const form = new Intl.PluralRules(i18n.locale).select(count) === "one" ? forms.one : forms.other;
-  return fill(form, { ...params, count: new Intl.NumberFormat(i18n.locale).format(count) });
+  return fill(form.replaceAll("{count}", new Intl.NumberFormat(i18n.locale).format(count)), params);
 }
 
 export { dayLabel, formatTime } from "./dates";

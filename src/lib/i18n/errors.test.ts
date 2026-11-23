@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "vitest";
 import { i18n } from "./index.svelte";
 import { describeError } from "./errors";
+import { plain } from "./testing";
 
 beforeEach(() => {
   i18n.locale = "es";
@@ -15,7 +16,7 @@ test("a backend error is told in the chosen language by its code", () => {
 });
 
 test("a rule error names the rule", () => {
-  expect(describeError({ code: "invalidRule", message: "x", detail: "Facturas" })).toContain("«Facturas»");
+  expect(plain(describeError({ code: "invalidRule", message: "x", detail: "Facturas" }))).toContain("«Facturas»");
   expect(describeError({ code: "invalidRule", message: "x" })).toBe(
     "Una regla tiene un error y no se puede evaluar.",
   );

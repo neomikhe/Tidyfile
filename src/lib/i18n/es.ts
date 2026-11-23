@@ -57,6 +57,11 @@ export const es = {
     one: "{count} no se pudo hacer; Actividad tiene los detalles.",
     other: "{count} no se pudieron hacer; Actividad tiene los detalles.",
   },
+  "run.notRecycled": {
+    one: "{count} no se tocó: habría quedado borrado para siempre, porque su unidad no tiene Papelera o el archivo no cabe en ella.",
+    other:
+      "{count} no se tocaron: habrían quedado borrados para siempre, porque su unidad no tiene Papelera o los archivos no caben en ella.",
+  },
 
   "join.and": " y ",
   "join.or": " o ",
@@ -104,6 +109,7 @@ export const es = {
   "editor.trashNoteMac": "Va a la Papelera; para recuperarlo usa «Devolver» en la Papelera de Finder.",
   "editor.patternInvalid": "Este patrón no es válido.",
   "editor.incompleteHint": "Completa la regla para poder guardarla.",
+  "editor.savesBlocked": "No se puede guardar mientras el archivo de reglas no se pueda leer.",
   "editor.delete": "Eliminar regla",
   "editor.deleteConfirm": "¿Eliminar la regla «{name}»?",
   "editor.deleteYes": "Eliminar",
@@ -145,6 +151,7 @@ export const es = {
   "example.trash": "iría a la Papelera",
   "example.none": "Ahora mismo ningún archivo de tus carpetas cumple esta regla.",
   "example.taken": "Los archivos que cumplen esta regla se los lleva antes la regla «{name}».",
+  "example.failed": "No se puede calcular un ejemplo con este borrador. Revisa los patrones y el nombre nuevo.",
 
   "activity.title": "Actividad",
   "activity.subtitle": "Cada lote se puede deshacer",
@@ -172,6 +179,17 @@ export const es = {
   "state.failed": "Falló",
   "state.skipped": "Omitido",
   "state.planned": "Pendiente",
+  "reason.noRecycleBin": "Sin Papelera",
+  "reason.noRecycleBinHint":
+    "Esta unidad no tiene Papelera (red, extraíble o desactivada) o no se pudo comprobar. Tidyfile no manda nada a una Papelera que no puede guardarlo, así que no lo ha tocado.",
+  "reason.tooBigForRecycleBin": "No cabe en la Papelera",
+  "reason.tooBigForRecycleBinHint":
+    "Es más grande que la Papelera de su unidad y Windows lo borraría para siempre, así que Tidyfile no lo ha tocado.",
+  "loop.stopped": {
+    one: "Tidyfile ha dejado de mover {files}: tus reglas lo movían una y otra vez sin parar. Revisa las reglas de las carpetas vigiladas.",
+    other:
+      "Tidyfile ha dejado de mover {count} archivos ({files}): tus reglas los movían una y otra vez sin parar. Revisa las reglas de las carpetas vigiladas.",
+  },
 
   "notice.manualRestore": {
     one: "{count} archivo no se pudo devolver de la Papelera automáticamente: este sistema no lo permite. Abre la Papelera y usa «Devolver».",
@@ -192,6 +210,11 @@ export const es = {
     one: "{count} archivo no se pudo devolver. No se ha sobrescrito nada: cierra el programa que lo esté usando, o aparta el archivo que ahora tiene ese nombre, y vuelve a deshacer.",
     other:
       "{count} archivos no se pudieron devolver. No se ha sobrescrito nada: cierra el programa que los esté usando, o aparta los archivos que ahora tienen esos nombres, y vuelve a deshacer.",
+  },
+  "notice.notRecycled": {
+    one: "{count} archivo no se pudo deshacer: habría quedado borrado para siempre, porque su unidad no tiene Papelera o no cabe en ella. Sigue donde estaba; bórralo tú si ya no lo quieres.",
+    other:
+      "{count} archivos no se pudieron deshacer: habrían quedado borrados para siempre, porque su unidad no tiene Papelera o no caben en ella. Siguen donde estaban; bórralos tú si ya no los quieres.",
   },
   "notice.unfinished": {
     one: "{count} operación no llegó a terminar.",
