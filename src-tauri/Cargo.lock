@@ -3680,6 +3680,7 @@ dependencies = [
  "chrono",
  "dunce",
  "globset",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "regex",

@@ -79,7 +79,7 @@ impl Operation {
         }
     }
 
-    fn destination(&self) -> Option<&Path> {
+    pub fn destination(&self) -> Option<&Path> {
         match self {
             Self::Move { to, .. } | Self::Copy { to, .. } => Some(to),
             Self::Trash { .. } => None,
@@ -141,6 +141,7 @@ pub struct RecordedOperation {
     pub operation: Operation,
     pub state: State,
     pub recorded_at: i64,
+    pub detail: Option<String>,
 }
 
 pub struct Journal {
@@ -211,7 +212,7 @@ impl Journal {
 
     pub fn interrupted(&self) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination, state, recorded_at FROM operations
+            "SELECT id, batch, kind, source, destination, state, recorded_at, detail FROM operations
              WHERE state = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([State::Planned.as_text()], read_row)?;
@@ -220,7 +221,7 @@ impl Journal {
 
     pub fn operation(&self, id: i64) -> Result<Option<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination, state, recorded_at FROM operations WHERE id = ?1",
+            "SELECT id, batch, kind, source, destination, state, recorded_at, detail FROM operations WHERE id = ?1",
         )?;
         let rows = statement.query_map([id], read_row)?;
         Ok(collect(rows)?.into_iter().next())
@@ -228,7 +229,7 @@ impl Journal {
 
     pub fn operations_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination, state, recorded_at FROM operations
+            "SELECT id, batch, kind, source, destination, state, recorded_at, detail FROM operations
              WHERE batch = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([batch], read_row)?;
@@ -253,7 +254,7 @@ impl Journal {
 
     pub fn skipped_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination, state, recorded_at FROM operations
+            "SELECT id, batch, kind, source, destination, state, recorded_at, detail FROM operations
              WHERE batch = ?1 AND state = ?2 ORDER BY id",
         )?;
         let rows = statement.query_map(params![batch, State::Skipped.as_text()], read_row)?;
@@ -262,7 +263,7 @@ impl Journal {
 
     pub fn applied_in_batch(&self, batch: &str) -> Result<Vec<RecordedOperation>, JournalError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, batch, kind, source, destination, state, recorded_at FROM operations
+            "SELECT id, batch, kind, source, destination, state, recorded_at, detail FROM operations
              WHERE batch = ?1 AND state = ?2 ORDER BY id DESC",
         )?;
         let rows = statement.query_map(params![batch, State::Done.as_text()], read_row)?;
@@ -305,7 +306,16 @@ fn read_summary(row: &rusqlite::Row) -> rusqlite::Result<BatchSummary> {
     })
 }
 
-type Row = (i64, String, String, String, Option<String>, String, i64);
+type Row = (
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    Option<String>,
+);
 
 fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
     Ok((
@@ -316,6 +326,7 @@ fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
     ))
 }
 
@@ -325,13 +336,14 @@ where
 {
     let mut recorded = Vec::new();
     for row in rows {
-        let (id, batch, kind, source, destination, state, recorded_at) = row?;
+        let (id, batch, kind, source, destination, state, recorded_at, detail) = row?;
         recorded.push(RecordedOperation {
             id,
             batch,
             operation: rebuild(&kind, source, destination)?,
             state: State::from_text(&state).ok_or(JournalError::UnknownKind)?,
             recorded_at,
+            detail,
         });
     }
     Ok(recorded)
@@ -579,6 +591,21 @@ mod tests {
 
         assert!(journal.interrupted().unwrap().is_empty());
         assert!(journal.applied_in_batch("batch-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failure_detail_is_read_back_with_the_operation() {
+        let journal = Journal::open_in_memory().unwrap();
+        let id = journal
+            .record_planned("batch-1", &move_operation("/a/x.pdf", "/b/x.pdf"))
+            .unwrap();
+        journal
+            .mark(id, State::Failed, Some("permission denied"))
+            .unwrap();
+
+        let recorded = journal.operations_in_batch("batch-1").unwrap();
+
+        assert_eq!(recorded[0].detail.as_deref(), Some("permission denied"));
     }
 
     #[test]

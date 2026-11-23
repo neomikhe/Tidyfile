@@ -9,6 +9,8 @@ use tidyfile_lib::rules::{Action, Combinator, Condition, Rule};
 use tidyfile_lib::service::Tidyfile;
 
 const FOLDER_VARIABLE: &str = "TIDYFILE_NO_RECYCLE_DIR";
+const SMALL_BIN_VARIABLE: &str = "TIDYFILE_SMALL_BIN_DIR";
+const BIGGER_THAN_THE_BIN: usize = 3 * 1024 * 1024;
 
 fn trash_logs() -> Rule {
     Rule {
@@ -36,8 +38,115 @@ fn copy_logs_to(folder: &Path) -> Rule {
     }
 }
 
+fn move_logs_to(folder: &Path) -> Rule {
+    Rule {
+        id: "move-logs".into(),
+        name: "Move logs".into(),
+        actions: vec![Action::MoveTo {
+            folder: folder.to_path_buf(),
+            subfolder: None,
+            rename: None,
+        }],
+        ..trash_logs()
+    }
+}
+
 fn drive_without_recycle_bin() -> PathBuf {
     PathBuf::from(std::env::var_os(FOLDER_VARIABLE).expect(FOLDER_VARIABLE))
+}
+
+fn drive_with_a_one_megabyte_bin() -> PathBuf {
+    PathBuf::from(std::env::var_os(SMALL_BIN_VARIABLE).expect(SMALL_BIN_VARIABLE))
+}
+
+fn big_log(folder: &Path) -> PathBuf {
+    let file = folder.join("tidyfile-probe.log");
+    fs::write(&file, vec![b'x'; BIGGER_THAN_THE_BIN]).unwrap();
+    file
+}
+
+fn size_of(file: &Path) -> usize {
+    usize::try_from(fs::metadata(file).unwrap().len()).unwrap()
+}
+
+#[test]
+#[ignore = "needs a drive whose Recycle Bin holds 1 MB: set TIDYFILE_SMALL_BIN_DIR and run with --ignored"]
+fn trash_of_a_file_larger_than_the_recycle_bin_keeps_the_file() {
+    let folder = TempDir::new_in(drive_with_a_one_megabyte_bin()).unwrap();
+    let file = big_log(folder.path());
+    let service = Tidyfile::in_memory().unwrap();
+
+    let report = service
+        .organize(
+            &[trash_logs()],
+            &[folder.path().to_path_buf()],
+            Collision::Suffix,
+        )
+        .unwrap();
+
+    assert_eq!(
+        (report.applied, report.failed, report.not_recycled),
+        (0, 1, 1),
+        "the trash rule was not refused"
+    );
+    assert_eq!(
+        size_of(&file),
+        BIGGER_THAN_THE_BIN,
+        "the file is gone or changed"
+    );
+}
+
+#[test]
+#[ignore = "needs a drive whose Recycle Bin holds 1 MB: set TIDYFILE_SMALL_BIN_DIR and run with --ignored"]
+fn undoing_a_copy_larger_than_the_recycle_bin_keeps_the_copy() {
+    let base = drive_with_a_one_megabyte_bin();
+    let (folder, copies) = (
+        TempDir::new_in(&base).unwrap(),
+        TempDir::new_in(&base).unwrap(),
+    );
+    big_log(folder.path());
+    let service = Tidyfile::in_memory().unwrap();
+    let rules = [copy_logs_to(copies.path())];
+    let report = service
+        .organize(&rules, &[folder.path().to_path_buf()], Collision::Suffix)
+        .unwrap();
+    assert_eq!(report.applied, 1, "the copy did not run");
+
+    let undone = service.undo(&report.batch).unwrap();
+
+    assert_eq!(
+        (undone.applied, undone.failed, undone.not_recycled),
+        (0, 1, 1),
+        "the undo was not refused"
+    );
+    let copy = copies.path().join("tidyfile-probe.log");
+    assert_eq!(size_of(&copy), BIGGER_THAN_THE_BIN, "the copy is gone");
+}
+
+#[test]
+#[ignore = "needs TIDYFILE_SMALL_BIN_DIR and, on another drive, TIDYFILE_NO_RECYCLE_DIR; run with --ignored"]
+fn moving_a_file_too_big_for_its_bin_to_another_drive_makes_no_copy() {
+    let folder = TempDir::new_in(drive_with_a_one_megabyte_bin()).unwrap();
+    let elsewhere = TempDir::new_in(drive_without_recycle_bin()).unwrap();
+    let file = big_log(folder.path());
+    let service = Tidyfile::in_memory().unwrap();
+    let rules = [move_logs_to(elsewhere.path())];
+
+    let report = service
+        .organize(&rules, &[folder.path().to_path_buf()], Collision::Suffix)
+        .unwrap();
+
+    assert_eq!(
+        (report.applied, report.failed, report.not_recycled),
+        (0, 1, 1),
+        "the move was not refused"
+    );
+    assert_eq!(size_of(&file), BIGGER_THAN_THE_BIN, "the source is gone");
+    assert_eq!(
+        fs::read_dir(elsewhere.path()).unwrap().count(),
+        0,
+        "a copy was left on the other drive"
+    );
 }
 
 #[test]
@@ -61,8 +170,8 @@ fn undoing_a_copy_on_a_drive_without_recycle_bin_keeps_the_copy() {
     let undone = service.undo(&report.batch).unwrap();
 
     assert_eq!(
-        (undone.applied, undone.failed),
-        (0, 1),
+        (undone.applied, undone.failed, undone.not_recycled),
+        (0, 1, 1),
         "the undo was not refused"
     );
     assert_eq!(
@@ -90,8 +199,8 @@ fn trash_on_a_drive_without_recycle_bin_keeps_the_file() {
         .unwrap();
 
     assert_eq!(
-        (report.applied, report.failed),
-        (0, 1),
+        (report.applied, report.failed, report.not_recycled),
+        (0, 1, 1),
         "the trash rule was not refused"
     );
     assert_eq!(

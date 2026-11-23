@@ -1,12 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::executor::{Collision, Executor, Outcome, SkipReason};
-use crate::journal::{Journal, JournalError, Operation, Origin};
+use crate::executor::{Collision, Executor, NotRecycled, Outcome, SkipReason, undo_batch_of};
+use crate::journal::{Journal, JournalError, Operation, Origin, RecordedOperation, State};
+use crate::loops::{Admission, LoopGuard, Span};
 use crate::paths::{self, PathError};
 use crate::rules::{EvaluationError, FileFacts, PlanContext, Rule, plan};
 use crate::watcher::is_temporary;
@@ -94,23 +95,56 @@ pub struct BatchReport {
     pub needs_manual_restore: usize,
     pub not_in_trash: usize,
     pub already_gone: usize,
+    pub not_recycled: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Arrival<'a> {
+    pub root: &'a Path,
+    pub file: &'a Path,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopStopped {
+    pub file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watched {
+    Tidied(BatchReport),
+    LoopStopped(LoopStopped),
+    Held,
 }
 
 pub struct Tidyfile {
     executor: Executor,
+    loops: LoopGuard,
+    clock: fn() -> Instant,
 }
 
 impl Tidyfile {
+    fn with_executor(executor: Executor) -> Self {
+        Self {
+            executor,
+            loops: LoopGuard::default(),
+            clock: Instant::now,
+        }
+    }
+
+    #[cfg(test)]
+    fn judging(journal: Journal, judge: fn(&Path, u64) -> crate::recycle::Verdict) -> Self {
+        Self::with_executor(Executor::judging_recycle_bin(journal, judge))
+    }
+
     pub fn open(journal: &Path) -> Result<Self, ServiceError> {
-        Ok(Self {
-            executor: Executor::new(Journal::open(journal)?),
-        })
+        Ok(Self::with_executor(Executor::new(Journal::open(journal)?)))
     }
 
     pub fn in_memory() -> Result<Self, ServiceError> {
-        Ok(Self {
-            executor: Executor::new(Journal::open_in_memory()?),
-        })
+        Ok(Self::with_executor(Executor::new(
+            Journal::open_in_memory()?
+        )))
     }
 
     pub fn simulate(
@@ -159,6 +193,16 @@ impl Tidyfile {
         on_collision: Collision,
         provenance: Provenance<'_>,
     ) -> Result<BatchReport, ServiceError> {
+        let (batch, outcomes) = self.run_batch(operations, on_collision, provenance)?;
+        Ok(summarize(batch, &outcomes))
+    }
+
+    fn run_batch(
+        &self,
+        operations: &[Operation],
+        on_collision: Collision,
+        provenance: Provenance<'_>,
+    ) -> Result<(String, Vec<Outcome>), ServiceError> {
         let batch = next_batch_id();
         if !operations.is_empty() {
             self.executor
@@ -166,7 +210,7 @@ impl Tidyfile {
                 .record_batch(&batch, provenance.origin, provenance.folder)?;
         }
         let outcomes = self.executor.apply(&batch, operations, on_collision)?;
-        Ok(summarize(batch, &outcomes))
+        Ok((batch, outcomes))
     }
 
     pub fn undo(&self, batch: &str) -> Result<BatchReport, ServiceError> {
@@ -192,31 +236,62 @@ impl Tidyfile {
     }
 
     pub fn organize_file(
-        &self,
+        &mut self,
         rules: &[Rule],
-        root: &Path,
-        file: &Path,
+        arrival: Arrival<'_>,
         on_collision: Collision,
-    ) -> Result<BatchReport, ServiceError> {
-        if !is_really_inside(root, file) {
-            return Ok(nothing_happened());
-        }
-        let Some(facts) = plannable(file, root) else {
-            return Ok(nothing_happened());
-        };
-        let context = PlanContext {
-            now: SystemTime::now(),
-            counter: 1,
-        };
-        let operations = plan(rules, &facts, context)?;
+    ) -> Result<Watched, ServiceError> {
+        let operations = plan_arrival(rules, arrival)?;
         if operations.is_empty() {
-            return Ok(nothing_happened());
+            return Ok(Watched::Tidied(nothing_happened()));
+        }
+        let (source, started) = (identity(arrival.file), (self.clock)());
+        if let Some(held) = self.hold_if_looping(&operations, &source, started) {
+            return Ok(held);
         }
         let provenance = Provenance {
             origin: Origin::Watch,
-            folder: Some(root),
+            folder: Some(arrival.root),
         };
-        self.apply_batch(&operations, on_collision, provenance)
+        let (batch, outcomes) = self.run_batch(&operations, on_collision, provenance)?;
+        let span = Span {
+            started,
+            finished: (self.clock)(),
+        };
+        self.remember_hops(&source, &outcomes, span);
+        Ok(Watched::Tidied(summarize(batch, &outcomes)))
+    }
+
+    fn hold_if_looping(
+        &mut self,
+        operations: &[Operation],
+        source: &Path,
+        now: Instant,
+    ) -> Option<Watched> {
+        if !operations.iter().any(relocates) {
+            return None;
+        }
+        match self.loops.admit(source, now) {
+            Admission::Proceed => None,
+            Admission::Stop => Some(Watched::Held),
+            Admission::StopAndAnnounce => Some(Watched::LoopStopped(LoopStopped {
+                file: name_of(source),
+            })),
+        }
+    }
+
+    fn remember_hops(&mut self, source: &Path, outcomes: &[Outcome], span: Span) {
+        for outcome in outcomes {
+            match outcome {
+                Outcome::Applied(Operation::Move { to, .. }) => {
+                    self.loops.moved(source, &identity(to), span);
+                }
+                Outcome::Applied(Operation::Copy { to, .. }) => {
+                    self.loops.copied(source, &identity(to), span);
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn resolve_conflicts(
@@ -234,12 +309,12 @@ impl Tidyfile {
     }
 
     pub fn operations(&self, batch: &str) -> Result<Vec<RecordedChange>, ServiceError> {
-        Ok(self
-            .executor
-            .journal()
+        let journal = self.executor.journal();
+        let undos = journal.operations_in_batch(&undo_batch_of(batch))?;
+        Ok(journal
             .operations_in_batch(batch)?
             .iter()
-            .map(recorded)
+            .map(|record| recorded(record, &undos))
             .collect())
     }
 
@@ -333,6 +408,35 @@ fn plannable_files(
         };
         plannable(&file, &root).map(|facts| (facts, context))
     }))
+}
+
+fn plan_arrival(rules: &[Rule], arrival: Arrival<'_>) -> Result<Vec<Operation>, ServiceError> {
+    if !is_really_inside(arrival.root, arrival.file) {
+        return Ok(Vec::new());
+    }
+    let Some(facts) = plannable(arrival.file, arrival.root) else {
+        return Ok(Vec::new());
+    };
+    let context = PlanContext {
+        now: SystemTime::now(),
+        counter: 1,
+    };
+    Ok(plan(rules, &facts, context)?)
+}
+
+fn relocates(operation: &Operation) -> bool {
+    matches!(operation, Operation::Move { .. } | Operation::Copy { .. })
+}
+
+// WHY: the watcher names files in their verbatim canonical form, while a rule writes them as the user typed them
+fn identity(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn plannable(file: &Path, root: &Path) -> Option<FileFacts> {
@@ -460,9 +564,10 @@ pub struct RecordedChange {
     pub destination: Option<String>,
     pub state: String,
     pub undoable: bool,
+    pub reason: Option<NotRecycled>,
 }
 
-fn recorded(record: &crate::journal::RecordedOperation) -> RecordedChange {
+fn recorded(record: &RecordedOperation, undos: &[RecordedOperation]) -> RecordedChange {
     let change = describe(&record.operation);
     RecordedChange {
         id: record.id,
@@ -470,8 +575,29 @@ fn recorded(record: &crate::journal::RecordedOperation) -> RecordedChange {
         source: change.source,
         destination: change.destination,
         state: format!("{:?}", record.state).to_lowercase(),
-        undoable: record.state == crate::journal::State::Done,
+        undoable: record.state == State::Done,
+        reason: reason_for(record, undos),
     }
+}
+
+// WHY: an operation still done can only owe its state to a refused undo; any other keeps its own failure
+fn reason_for(record: &RecordedOperation, undos: &[RecordedOperation]) -> Option<NotRecycled> {
+    let failure = match record.state {
+        State::Done => latest_undo(record, undos)?,
+        _ => record,
+    };
+    NotRecycled::from_detail(failure.detail.as_deref()?)
+}
+
+fn latest_undo<'a>(
+    record: &RecordedOperation,
+    undos: &'a [RecordedOperation],
+) -> Option<&'a RecordedOperation> {
+    let placed = record.operation.destination()?;
+    undos
+        .iter()
+        .rev()
+        .find(|undo| undo.operation.source() == placed)
 }
 
 fn describe(operation: &Operation) -> PlannedChange {
@@ -506,7 +632,12 @@ fn summarize(batch: String, outcomes: &[Outcome]) -> BatchReport {
         already_gone: count(outcomes, |outcome| {
             matches!(outcome, Outcome::Skipped(SkipReason::SourceVanished))
         }),
+        not_recycled: count(outcomes, is_not_recycled),
     }
+}
+
+fn is_not_recycled(outcome: &Outcome) -> bool {
+    matches!(outcome, Outcome::Failed(detail) if NotRecycled::from_detail(detail).is_some())
 }
 
 fn count(outcomes: &[Outcome], predicate: impl Fn(&Outcome) -> bool) -> usize {
@@ -514,15 +645,7 @@ fn count(outcomes: &[Outcome], predicate: impl Fn(&Outcome) -> bool) -> usize {
 }
 
 fn nothing_happened() -> BatchReport {
-    BatchReport {
-        batch: String::new(),
-        applied: 0,
-        skipped: 0,
-        failed: 0,
-        needs_manual_restore: 0,
-        not_in_trash: 0,
-        already_gone: 0,
-    }
+    summarize(String::new(), &[])
 }
 
 fn next_batch_id() -> String {
@@ -538,8 +661,9 @@ fn next_batch_id() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::recycle::Verdict;
     use crate::rules::{Action, Combinator, Condition};
-    use crate::testing::watchable_folder;
+    use crate::testing::{link_folder, watchable_folder};
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -804,22 +928,229 @@ mod tests {
         );
     }
 
+    fn watched(service: &mut Tidyfile, rules: &[Rule], arrival: Arrival<'_>) -> BatchReport {
+        match service
+            .organize_file(rules, arrival, Collision::Suffix)
+            .unwrap()
+        {
+            Watched::Tidied(report) => report,
+            held => panic!("the watcher held the file back: {held:?}"),
+        }
+    }
+
+    fn txt_rule(found_in: Option<&str>, folder: &Path, subfolder: Option<&str>) -> Rule {
+        let mut conditions = vec![Condition::Extension {
+            any_of: vec!["txt".into()],
+        }];
+        conditions.extend(found_in.map(|name| Condition::InSubfolder { name: name.into() }));
+        Rule {
+            id: "txt".into(),
+            name: "txt".into(),
+            enabled: true,
+            combinator: Combinator::All,
+            conditions,
+            actions: vec![Action::MoveTo {
+                folder: folder.to_path_buf(),
+                subfolder: subfolder.map(Into::into),
+                rename: None,
+            }],
+        }
+    }
+
+    const BOUNCER: &str = "bounce.txt";
+
+    fn copies_of_the_bouncer(roots: &[&Path]) -> Vec<(PathBuf, PathBuf)> {
+        roots
+            .iter()
+            .flat_map(|root| {
+                scan(root)
+                    .into_iter()
+                    .map(|file| (root.to_path_buf(), file))
+            })
+            .filter(|(_, file)| file.file_name().is_some_and(|name| name == BOUNCER))
+            .collect()
+    }
+
+    fn watch_rounds(service: &mut Tidyfile, rules: &[Rule], roots: &[&Path]) -> Vec<Watched> {
+        (0..8)
+            .map(|_| {
+                let (root, file) = copies_of_the_bouncer(roots).remove(0);
+                let arrival = Arrival {
+                    root: &root,
+                    file: &file,
+                };
+                service
+                    .organize_file(rules, arrival, Collision::Suffix)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn moves_in(rounds: &[Watched]) -> usize {
+        rounds
+            .iter()
+            .filter(|round| matches!(round, Watched::Tidied(report) if report.applied == 1))
+            .count()
+    }
+
+    fn ping_pong(a: &Path, b: &Path) -> [Rule; 2] {
+        [
+            txt_rule(Some("back"), a, None),
+            txt_rule(None, b, Some("back")),
+        ]
+    }
+
+    #[test]
+    fn a_file_bouncing_between_two_watched_folders_is_stopped_and_kept_whole() {
+        let (a, b) = (watchable_folder(), watchable_folder());
+        write(&a.path().join(BOUNCER), "the only copy");
+        let mut service = Tidyfile::in_memory().unwrap();
+
+        let rounds = watch_rounds(
+            &mut service,
+            &ping_pong(a.path(), b.path()),
+            &[a.path(), b.path()],
+        );
+
+        assert_eq!(moves_in(&rounds), 3, "{rounds:?}");
+        let left = copies_of_the_bouncer(&[a.path(), b.path()]);
+        assert_eq!(left.len(), 1, "the file was duplicated or lost: {left:?}");
+        assert_eq!(fs::read_to_string(&left[0].1).unwrap(), "the only copy");
+        assert_eq!(
+            service.activity(100).unwrap().len(),
+            3,
+            "a move that was held back must not reach the history"
+        );
+    }
+
+    #[test]
+    fn a_stopped_loop_is_announced_once_by_file_name_only() {
+        let (a, b) = (watchable_folder(), watchable_folder());
+        write(&a.path().join(BOUNCER), "content");
+        let mut service = Tidyfile::in_memory().unwrap();
+
+        let rounds = watch_rounds(
+            &mut service,
+            &ping_pong(a.path(), b.path()),
+            &[a.path(), b.path()],
+        );
+
+        let announced: Vec<&Watched> = rounds
+            .iter()
+            .filter(|round| matches!(round, Watched::LoopStopped(_)))
+            .collect();
+        let stopped = Watched::LoopStopped(LoopStopped {
+            file: BOUNCER.into(),
+        });
+        assert_eq!(announced, [&stopped]);
+        assert!(
+            rounds[4..].iter().all(|round| *round == Watched::Held),
+            "{rounds:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(LoopStopped {
+                file: BOUNCER.into()
+            })
+            .unwrap(),
+            serde_json::json!({ "file": BOUNCER })
+        );
+    }
+
+    const MOVE_TAKES: std::time::Duration = std::time::Duration::from_secs(70);
+    const NEXT_ARRIVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+    thread_local! {
+        static READINGS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static EPOCH: Instant = Instant::now();
+    }
+
+    // WHY: organize_file reads the clock as a move starts and as it ends, so readings alternate the two gaps
+    fn clock_of_slow_moves() -> Instant {
+        let reading = READINGS.with(|readings| readings.replace(readings.get() + 1));
+        let elapsed = MOVE_TAKES * reading.div_ceil(2) + NEXT_ARRIVAL * (reading / 2);
+        EPOCH.with(|epoch| *epoch + elapsed)
+    }
+
+    #[test]
+    fn a_bounce_whose_every_move_outlasts_the_window_is_still_stopped() {
+        let (a, b) = (watchable_folder(), watchable_folder());
+        write(&a.path().join(BOUNCER), "the only copy");
+        let mut service = Tidyfile {
+            clock: clock_of_slow_moves,
+            ..Tidyfile::in_memory().unwrap()
+        };
+
+        let rounds = watch_rounds(
+            &mut service,
+            &ping_pong(a.path(), b.path()),
+            &[a.path(), b.path()],
+        );
+
+        let (bounces, stop) = (&rounds[..3], &rounds[3]);
+        assert_eq!(moves_in(bounces), 3, "{rounds:?}");
+        assert!(matches!(stop, Watched::LoopStopped(_)), "{rounds:?}");
+    }
+
+    #[test]
+    fn a_chain_of_three_watched_folders_still_completes() {
+        let (downloads, inbox, archive) =
+            (watchable_folder(), watchable_folder(), watchable_folder());
+        write(&downloads.path().join(BOUNCER), "content");
+        let rules = [
+            txt_rule(Some("final"), archive.path(), Some("final")),
+            txt_rule(Some("inbox"), archive.path(), Some("final")),
+            txt_rule(None, inbox.path(), Some("inbox")),
+        ];
+        let roots = [downloads.path(), inbox.path(), archive.path()];
+        let mut service = Tidyfile::in_memory().unwrap();
+
+        let rounds = watch_rounds(&mut service, &rules, &roots);
+
+        assert_eq!(moves_in(&rounds), 2, "{rounds:?}");
+        assert!(
+            !rounds
+                .iter()
+                .any(|round| matches!(round, Watched::LoopStopped(_) | Watched::Held)),
+            "a chain that settles was taken for a loop: {rounds:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(archive.path().join("final").join(BOUNCER)).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn tidying_by_hand_is_never_held_back_by_the_loop_guard() {
+        let (a, b) = (watchable_folder(), watchable_folder());
+        write(&a.path().join(BOUNCER), "content");
+        let rules = ping_pong(a.path(), b.path());
+        let mut service = Tidyfile::in_memory().unwrap();
+        watch_rounds(&mut service, &rules, &[a.path(), b.path()]);
+        let held_in = copies_of_the_bouncer(&[a.path(), b.path()]).remove(0).0;
+
+        let report = service
+            .organize(&rules, &[held_in], Collision::Suffix)
+            .unwrap();
+
+        assert_eq!(report.applied, 1);
+    }
+
     #[test]
     fn a_watched_file_is_recorded_with_its_folder() {
         let root = watchable_folder();
         let out = watchable_folder();
         let file = root.path().join("invoice.pdf");
         write(&file, "content");
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
-        service
-            .organize_file(
-                &[pdf_rule(out.path())],
-                root.path(),
-                &file,
-                Collision::Suffix,
-            )
-            .unwrap();
+        watched(
+            &mut service,
+            &[pdf_rule(out.path())],
+            Arrival {
+                root: root.path(),
+                file: &file,
+            },
+        );
 
         let entry = &service.activity(10).unwrap()[0];
         assert_eq!(entry.origin.as_deref(), Some("watch"));
@@ -898,6 +1229,280 @@ mod tests {
                 report.failed
             ),
             (1, 1, 3, 1)
+        );
+    }
+
+    const NO_BIN: &str = "the Recycle Bin is not available on this drive";
+    const TOO_BIG: &str = "the file is larger than the Recycle Bin of this drive";
+
+    fn trashing_pdfs() -> Rule {
+        let mut trashing = pdf_rule(Path::new("/unused"));
+        trashing.actions = vec![Action::Trash];
+        trashing
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_ending_in_a_space_never_trashes_its_namesake() {
+        let root = watchable_folder();
+        let verbatim = root.path().canonicalize().unwrap();
+        write(&verbatim.join("report.pdf "), "the odd one");
+        write(&verbatim.join("report.pdf"), "the real report");
+        let mut trashing_the_odd_one = trashing_pdfs();
+        trashing_the_odd_one.conditions = vec![Condition::NameMatchesRegex {
+            pattern: " $".into(),
+        }];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize(
+                &[trashing_the_odd_one],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(verbatim.join("report.pdf")).unwrap(),
+            "the real report",
+            "{report:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(verbatim.join("report.pdf ")).unwrap(),
+            "the odd one"
+        );
+        assert_eq!((report.applied, report.failed), (0, 1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_ending_in_a_dot_never_lets_the_trash_reach_its_namesake() {
+        let root = watchable_folder();
+        let verbatim = root.path().canonicalize().unwrap();
+        write(&verbatim.join("Old.").join("report.pdf"), "the odd one");
+        write(&verbatim.join("Old").join("report.pdf"), "the real report");
+        let mut trashing_the_odd_one = trashing_pdfs();
+        trashing_the_odd_one.conditions = vec![Condition::InSubfolder {
+            name: "Old.".into(),
+        }];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let report = service
+            .organize(
+                &[trashing_the_odd_one],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        let namesake = verbatim.join("Old").join("report.pdf");
+        assert_eq!(fs::read_to_string(namesake).unwrap(), "the real report");
+        assert!(verbatim.join("Old.").join("report.pdf").exists());
+        assert_eq!((report.applied, report.failed), (0, 1));
+    }
+
+    fn renaming_pdfs_into(folder: &Path, template: &str) -> Rule {
+        let mut renaming = pdf_rule(folder);
+        renaming.actions = vec![Action::MoveTo {
+            folder: folder.to_path_buf(),
+            subfolder: None,
+            rename: Some(template.into()),
+        }];
+        renaming
+    }
+
+    #[test]
+    fn a_file_whose_name_breaks_a_template_is_left_alone_and_the_rest_still_tidied() {
+        let (root, out) = (watchable_folder(), watchable_folder());
+        let inside = root.path().canonicalize().unwrap();
+        write(&inside.join("CON.pdf"), "a device name from a download");
+        write(&inside.join("a.pdf"), "an ordinary report");
+        let rules = [renaming_pdfs_into(out.path(), "{name}.{ext}")];
+        let folders = [root.path().to_path_buf()];
+        let service = Tidyfile::in_memory().unwrap();
+
+        let preview = service.simulate(&rules, &folders).unwrap();
+        let as_shown = Shown {
+            changes: &preview,
+            on_collision: Collision::Suffix,
+        };
+        let report = service
+            .organize_as_shown(&rules, &folders, as_shown)
+            .unwrap();
+
+        assert_eq!(preview.len(), 1, "{preview:?}");
+        assert!(preview[0].source.ends_with("a.pdf"), "{preview:?}");
+        assert_eq!(report.applied, 1);
+        assert!(inside.join("CON.pdf").exists(), "CON.pdf was touched");
+    }
+
+    #[test]
+    fn a_template_no_file_name_can_satisfy_still_stops_the_preview() {
+        let (root, out) = (watchable_folder(), watchable_folder());
+        write(&root.path().join("a.pdf"), "an ordinary report");
+        let rules = [renaming_pdfs_into(out.path(), "CON")];
+
+        let planned = Tidyfile::in_memory()
+            .unwrap()
+            .simulate(&rules, &[root.path().to_path_buf()]);
+
+        assert!(matches!(
+            planned,
+            Err(ServiceError::Rules(EvaluationError::Template { .. }))
+        ));
+    }
+
+    fn copying_pdfs_to(folder: &Path) -> Rule {
+        let mut copying = pdf_rule(folder);
+        copying.actions = vec![Action::CopyTo {
+            folder: folder.to_path_buf(),
+            subfolder: None,
+            rename: None,
+        }];
+        copying
+    }
+
+    fn judged(journal: &Path, judge: fn(&Path, u64) -> Verdict) -> Tidyfile {
+        Tidyfile::judging(Journal::open(journal).unwrap(), judge)
+    }
+
+    #[test]
+    fn refusals_to_reach_the_recycle_bin_are_counted_as_not_recycled() {
+        let outcomes = [
+            Outcome::Failed(NO_BIN.into()),
+            Outcome::Failed(TOO_BIG.into()),
+            Outcome::Failed("the file could not be moved".into()),
+            Outcome::Skipped(SkipReason::SourceVanished),
+        ];
+
+        let report = summarize("b1".into(), &outcomes);
+
+        assert_eq!((report.not_recycled, report.failed), (2, 3));
+    }
+
+    #[test]
+    fn a_trash_refused_for_lack_of_a_recycle_bin_says_why() {
+        let data = tempfile::TempDir::new().unwrap();
+        let root = watchable_folder();
+        write(&root.path().join("old.pdf"), "content");
+        let service = judged(&data.path().join("j.sqlite"), |_, _| Verdict::NoRecycleBin);
+
+        let report = service
+            .organize(
+                &[trashing_pdfs()],
+                &[root.path().to_path_buf()],
+                Collision::Suffix,
+            )
+            .unwrap();
+
+        assert_eq!((report.failed, report.not_recycled), (1, 1));
+        let recorded = service.operations(&report.batch).unwrap();
+        assert_eq!(recorded[0].reason, Some(NotRecycled::NoRecycleBin));
+        assert!(root.path().join("old.pdf").exists());
+    }
+
+    #[test]
+    fn an_undo_refused_as_too_big_is_explained_on_the_operation_it_left_in_place() {
+        let data = tempfile::TempDir::new().unwrap();
+        let (root, out) = (watchable_folder(), watchable_folder());
+        write(&root.path().join("video.pdf"), "content");
+        let service = judged(&data.path().join("j.sqlite"), |_, _| Verdict::TooBig);
+        let folders = [root.path().to_path_buf()];
+        let rules = [copying_pdfs_to(out.path())];
+        let report = service
+            .organize(&rules, &folders, Collision::Suffix)
+            .unwrap();
+
+        let undone = service.undo(&report.batch).unwrap();
+
+        assert_eq!((undone.failed, undone.not_recycled), (1, 1));
+        let recorded = &service.operations(&report.batch).unwrap()[0];
+        assert_eq!((recorded.state.as_str(), recorded.undoable), ("done", true));
+        assert_eq!(recorded.reason, Some(NotRecycled::TooBigForRecycleBin));
+        assert!(out.path().join("video.pdf").exists());
+    }
+
+    #[test]
+    fn undoing_a_single_operation_counts_its_refusal_too() {
+        let data = tempfile::TempDir::new().unwrap();
+        let (root, out) = (watchable_folder(), watchable_folder());
+        write(&root.path().join("video.pdf"), "content");
+        let service = judged(&data.path().join("j.sqlite"), |_, _| Verdict::TooBig);
+        let folders = [root.path().to_path_buf()];
+        let rules = [copying_pdfs_to(out.path())];
+        let report = service
+            .organize(&rules, &folders, Collision::Suffix)
+            .unwrap();
+        let id = service.operations(&report.batch).unwrap()[0].id;
+
+        let undone = service.undo_operation(id).unwrap();
+
+        assert_eq!((undone.failed, undone.not_recycled), (1, 1));
+    }
+
+    #[test]
+    fn the_reason_clears_once_a_later_undo_succeeds() {
+        let data = tempfile::TempDir::new().unwrap();
+        let journal = data.path().join("j.sqlite");
+        let (root, out) = (watchable_folder(), watchable_folder());
+        write(&root.path().join("video.pdf"), "content");
+        let folders = [root.path().to_path_buf()];
+        let rules = [copying_pdfs_to(out.path())];
+        let refusing = judged(&journal, |_, _| Verdict::TooBig);
+        let report = refusing
+            .organize(&rules, &folders, Collision::Suffix)
+            .unwrap();
+        refusing.undo(&report.batch).unwrap();
+        drop(refusing);
+        let able = judged(&journal, |_, _| Verdict::Recyclable);
+
+        able.undo(&report.batch).unwrap();
+
+        let recorded = &able.operations(&report.batch).unwrap()[0];
+        assert_eq!((recorded.state.as_str(), recorded.reason), ("undone", None));
+        assert!(!out.path().join("video.pdf").exists());
+    }
+
+    #[test]
+    fn an_operation_that_went_through_carries_no_reason() {
+        let (root, out) = (watchable_folder(), watchable_folder());
+        write(&root.path().join("invoice.pdf"), "content");
+        let service = Tidyfile::in_memory().unwrap();
+        let folders = [root.path().to_path_buf()];
+
+        let report = service
+            .organize(&[pdf_rule(out.path())], &folders, Collision::Suffix)
+            .unwrap();
+
+        assert_eq!(report.not_recycled, 0);
+        assert_eq!(service.operations(&report.batch).unwrap()[0].reason, None);
+    }
+
+    #[test]
+    fn the_reports_cross_ipc_in_the_agreed_shape() {
+        let change = RecordedChange {
+            id: 7,
+            kind: "copy".into(),
+            source: "a.pdf".into(),
+            destination: Some("b.pdf".into()),
+            state: "done".into(),
+            undoable: true,
+            reason: Some(NotRecycled::TooBigForRecycleBin),
+        };
+        let without = RecordedChange {
+            reason: None,
+            ..change.clone()
+        };
+        let report = summarize("b1".into(), &[Outcome::Failed(NO_BIN.into())]);
+
+        let with_reason = serde_json::to_value(&change).unwrap();
+        let without_reason = serde_json::to_value(&without).unwrap();
+        assert_eq!(with_reason["reason"], "tooBigForRecycleBin");
+        assert_eq!(without_reason.get("reason"), Some(&serde_json::Value::Null));
+        assert_eq!(serde_json::to_value(&report).unwrap()["notRecycled"], 1);
+        assert_eq!(
+            serde_json::to_value(NotRecycled::NoRecycleBin).unwrap(),
+            "noRecycleBin"
         );
     }
 
@@ -1125,16 +1730,16 @@ mod tests {
         let out = watchable_folder();
         let folder = root.path().join("looks-like.pdf");
         write(&folder.join("inside.txt"), "content");
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
-        let report = service
-            .organize_file(
-                &[pdf_rule(out.path())],
-                root.path(),
-                &folder,
-                Collision::Suffix,
-            )
-            .unwrap();
+        let report = watched(
+            &mut service,
+            &[pdf_rule(out.path())],
+            Arrival {
+                root: root.path(),
+                file: &folder,
+            },
+        );
 
         assert_eq!(report.applied, 0);
         assert!(folder.join("inside.txt").exists());
@@ -1166,12 +1771,11 @@ mod tests {
         write(&direct, "half");
         write(&nested, "half");
         let rules = [pdf_rule(out.path())];
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
         for file in [&direct, &nested] {
-            let report = service
-                .organize_file(&rules, root.path(), file, Collision::Suffix)
-                .unwrap();
+            let root = root.path();
+            let report = watched(&mut service, &rules, Arrival { root, file });
             assert_eq!(
                 report.applied,
                 0,
@@ -1189,19 +1793,19 @@ mod tests {
         write(&root.join("Backup.tmp/invoice.pdf"), "content");
         write(&root.join("receipt.pdf"), "content");
         let rules = [pdf_rule(out.path())];
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
         let planned = service
             .simulate(&rules, std::slice::from_ref(&root))
             .unwrap();
-        let report = service
-            .organize_file(
-                &rules,
-                &root,
-                &root.join("Backup.tmp/invoice.pdf"),
-                Collision::Suffix,
-            )
-            .unwrap();
+        let report = watched(
+            &mut service,
+            &rules,
+            Arrival {
+                root: &root,
+                file: &root.join("Backup.tmp/invoice.pdf"),
+            },
+        );
 
         assert_eq!(
             planned.len(),
@@ -1295,22 +1899,6 @@ mod tests {
         assert_eq!((report.applied, report.skipped, report.failed), (0, 0, 0));
     }
 
-    #[cfg(windows)]
-    fn link_folder(link: &Path, target: &Path) {
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "could not create the junction");
-    }
-
-    #[cfg(unix)]
-    fn link_folder(link: &Path, target: &Path) {
-        std::os::unix::fs::symlink(target, link).unwrap();
-    }
-
     #[test]
     fn a_linked_folder_does_not_take_the_scan_outside() {
         let root = watchable_folder();
@@ -1341,16 +1929,16 @@ mod tests {
         let out = watchable_folder();
         let file = root.path().join("invoice.pdf");
         write(&file, "content");
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
-        let report = service
-            .organize_file(
-                &[pdf_rule(out.path())],
-                root.path(),
-                &file,
-                Collision::Suffix,
-            )
-            .unwrap();
+        let report = watched(
+            &mut service,
+            &[pdf_rule(out.path())],
+            Arrival {
+                root: root.path(),
+                file: &file,
+            },
+        );
 
         assert_eq!(report.applied, 1);
         assert!(out.path().join("invoice.pdf").exists());
@@ -1360,22 +1948,22 @@ mod tests {
     fn a_watcher_event_through_a_link_does_not_reach_outside() {
         let base = watchable_folder();
         let out = watchable_folder();
-        let watched = base.path().join("watched");
+        let watched_folder = base.path().join("watched");
         let outside = base.path().join("outside");
-        fs::create_dir_all(&watched).unwrap();
+        fs::create_dir_all(&watched_folder).unwrap();
         write(&outside.join("secret.pdf"), "outside the watched folder");
-        link_folder(&watched.join("escape"), &outside);
-        let through_link = watched.join("escape").join("secret.pdf");
-        let service = Tidyfile::in_memory().unwrap();
+        link_folder(&watched_folder.join("escape"), &outside);
+        let through_link = watched_folder.join("escape").join("secret.pdf");
+        let mut service = Tidyfile::in_memory().unwrap();
 
-        let report = service
-            .organize_file(
-                &[pdf_rule(out.path())],
-                &watched,
-                &through_link,
-                Collision::Suffix,
-            )
-            .unwrap();
+        let report = watched(
+            &mut service,
+            &[pdf_rule(out.path())],
+            Arrival {
+                root: &watched_folder,
+                file: &through_link,
+            },
+        );
 
         assert_eq!(report.applied, 0);
         assert!(
@@ -1392,16 +1980,16 @@ mod tests {
         write(&elsewhere.join("invoice.pdf"), "not in the watched folder");
         let swapped = base.path().join("Downloads");
         link_folder(&swapped, &elsewhere);
-        let service = Tidyfile::in_memory().unwrap();
+        let mut service = Tidyfile::in_memory().unwrap();
 
-        let report = service
-            .organize_file(
-                &[pdf_rule(out.path())],
-                &swapped,
-                &swapped.join("invoice.pdf"),
-                Collision::Suffix,
-            )
-            .unwrap();
+        let report = watched(
+            &mut service,
+            &[pdf_rule(out.path())],
+            Arrival {
+                root: &swapped,
+                file: &swapped.join("invoice.pdf"),
+            },
+        );
 
         assert_eq!(report.applied, 0);
         assert!(elsewhere.join("invoice.pdf").exists());

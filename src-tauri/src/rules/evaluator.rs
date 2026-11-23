@@ -21,7 +21,7 @@ pub enum EvaluationError {
         source: TemplateError,
     },
     #[error("the file has no usable name")]
-    NamelessFile,
+    UnusableName,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,10 +37,20 @@ pub fn plan(
 ) -> Result<Vec<Operation>, EvaluationError> {
     for rule in rules.iter().filter(|rule| rule.enabled) {
         if applies(rule, facts, context.now)? {
-            return operations(rule, facts, context);
+            return left_alone_if_unusable(operations(rule, facts, context));
         }
     }
     Ok(Vec::new())
+}
+
+// WHY: one file whose name the rule cannot use is left untouched, so it cannot hold back every other file
+fn left_alone_if_unusable(
+    planned: Result<Vec<Operation>, EvaluationError>,
+) -> Result<Vec<Operation>, EvaluationError> {
+    match planned {
+        Err(EvaluationError::UnusableName) => Ok(Vec::new()),
+        planned => planned,
+    }
 }
 
 fn applies(rule: &Rule, facts: &FileFacts, now: SystemTime) -> Result<bool, EvaluationError> {
@@ -144,11 +154,20 @@ fn render_subfolder(
     context: PlanContext,
 ) -> Result<PathBuf, EvaluationError> {
     templates::render_subfolder(template, substitutions(facts, context)).map_err(|source| {
-        EvaluationError::Template {
-            rule: rule.name.clone(),
-            source,
-        }
+        let is_sound = templates::renders_subfolder_for_a_plain_name(template);
+        blame(rule, source, is_sound)
     })
+}
+
+// WHY: only a template that fails for every name is the rule's fault; failing for one name is that file's
+fn blame(rule: &Rule, source: TemplateError, is_sound: bool) -> EvaluationError {
+    if is_sound {
+        return EvaluationError::UnusableName;
+    }
+    EvaluationError::Template {
+        rule: rule.name.clone(),
+        source,
+    }
 }
 
 fn target_name(
@@ -163,7 +182,7 @@ fn target_name(
             .path
             .file_name()
             .map(OsString::from)
-            .ok_or(EvaluationError::NamelessFile),
+            .ok_or(EvaluationError::UnusableName),
     }
 }
 
@@ -173,12 +192,8 @@ fn render(
     facts: &FileFacts,
     context: PlanContext,
 ) -> Result<String, EvaluationError> {
-    templates::render(template, substitutions(facts, context)).map_err(|source| {
-        EvaluationError::Template {
-            rule: rule.name.clone(),
-            source,
-        }
-    })
+    templates::render(template, substitutions(facts, context))
+        .map_err(|source| blame(rule, source, templates::renders_for_a_plain_name(template)))
 }
 
 fn substitutions(facts: &FileFacts, context: PlanContext) -> Substitutions<'_> {
@@ -194,7 +209,7 @@ fn parent_of(facts: &FileFacts) -> Result<PathBuf, EvaluationError> {
         .path
         .parent()
         .map(Path::to_path_buf)
-        .ok_or(EvaluationError::NamelessFile)
+        .ok_or(EvaluationError::UnusableName)
 }
 
 #[cfg(test)]
@@ -524,6 +539,20 @@ mod tests {
                 to: PathBuf::from("/sorted").join("pdf").join("2026-03-07.pdf"),
             }]
         );
+    }
+
+    #[test]
+    fn a_file_whose_own_name_breaks_a_subfolder_template_gets_no_plan_instead_of_an_error() {
+        let mut sorting = rule("by name", Combinator::All, vec![is_pdf()]);
+        sorting.actions = vec![Action::MoveTo {
+            folder: PathBuf::from("/out"),
+            subfolder: Some("{name}".into()),
+            rename: None,
+        }];
+
+        let planned = plan(&[sorting], &facts("CON.pdf"), context()).unwrap();
+
+        assert!(planned.is_empty(), "{planned:?}");
     }
 
     #[test]

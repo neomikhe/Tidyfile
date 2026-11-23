@@ -8,9 +8,10 @@ const MAX_NAME_LENGTH: usize = 200;
 
 const FORBIDDEN_CHARACTERS: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
-const RESERVED_STEMS: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+const RESERVED_STEMS: [&str; 32] = [
+    "con", "prn", "aux", "nul", "conin$", "conout$", "com0", "com1", "com2", "com3", "com4",
+    "com5", "com6", "com7", "com8", "com9", "com¹", "com²", "com³", "lpt0", "lpt1", "lpt2", "lpt3",
+    "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹", "lpt²", "lpt³",
 ];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -52,6 +53,23 @@ pub fn render_subfolder(template: &str, values: Substitutions) -> Result<PathBuf
     }
     reject_traversal(template)?;
     build_relative(&substitute(template, values)?)
+}
+
+// WHY: a template that renders for a plain name is sound, so failing for one file is that file's name
+pub fn renders_for_a_plain_name(template: &str) -> bool {
+    render(template, plain_name()).is_ok()
+}
+
+pub fn renders_subfolder_for_a_plain_name(template: &str) -> bool {
+    render_subfolder(template, plain_name()).is_ok()
+}
+
+fn plain_name() -> Substitutions<'static> {
+    Substitutions {
+        path: Path::new("file.txt"),
+        modified: SystemTime::UNIX_EPOCH,
+        counter: 1,
+    }
 }
 
 fn build_relative(rendered: &str) -> Result<PathBuf, TemplateError> {
@@ -118,10 +136,12 @@ fn validate(rendered: &str) -> Result<(), TemplateError> {
     reject_reserved(rendered)
 }
 
+// WHY: Windows reads `nul .txt` as the NUL device too, since spaces before the extension are dropped
 fn reject_reserved(rendered: &str) -> Result<(), TemplateError> {
     let stem = rendered
         .split_once('.')
         .map_or(rendered, |(before, _)| before)
+        .trim_end_matches(' ')
         .to_ascii_lowercase();
     if RESERVED_STEMS.contains(&stem.as_str()) {
         return Err(TemplateError::ReservedName);
@@ -280,7 +300,22 @@ mod tests {
 
     #[test]
     fn windows_reserved_names_are_refused() {
-        for template in ["CON", "nul", "COM1.txt", "LPT9.log", "Aux"] {
+        for template in [
+            "CON",
+            "nul",
+            "COM1.txt",
+            "LPT9.log",
+            "Aux",
+            "COM0",
+            "lpt0.txt",
+            "COM¹",
+            "com².log",
+            "LPT³",
+            "CONIN$",
+            "conout$.txt",
+            "nul .txt",
+            "Con  .log",
+        ] {
             assert_eq!(
                 render_for(template, "a.pdf").unwrap_err(),
                 TemplateError::ReservedName,

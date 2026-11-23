@@ -7,7 +7,7 @@ use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer_opt,
 };
 
-const TEMPORARY_EXTENSIONS: [&str; 7] = [
+const TEMPORARY_EXTENSIONS: [&str; 8] = [
     "crdownload",
     "part",
     "partial",
@@ -15,6 +15,7 @@ const TEMPORARY_EXTENSIONS: [&str; 7] = [
     "temp",
     "download",
     "opdownload",
+    crate::executor::PARTIAL_EXTENSION,
 ];
 
 const TEMPORARY_PREFIXES: [&str; 3] = ["~$", ".~lock.", ".goutputstream"];
@@ -124,6 +125,17 @@ mod tests {
             "setup.download",
             "~$budget.xlsx",
             ".~lock.report.odt#",
+        ] {
+            assert!(is_temporary(Path::new(name)), "should ignore {name}");
+        }
+    }
+
+    #[test]
+    fn a_copy_tidyfile_set_aside_is_never_tidied_again() {
+        for name in [
+            "video.mkv.tidyfile-partial",
+            "video.mkv (2).tidyfile-partial",
+            "VIDEO.MKV.TIDYFILE-PARTIAL",
         ] {
             assert!(is_temporary(Path::new(name)), "should ignore {name}");
         }

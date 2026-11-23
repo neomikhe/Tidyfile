@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use crate::ipc::current_collision;
 use crate::paths;
 use crate::rules::Rule;
-use crate::service::{BatchReport, ServiceError, Tidyfile};
+use crate::service::{Arrival, BatchReport, ServiceError, Tidyfile, Watched};
 use crate::settings::Settings;
 use crate::store;
 use crate::watcher::FolderWatcher;
@@ -18,6 +18,7 @@ const QUIET_PERIOD: Duration = Duration::from_millis(1_500);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub const TIDIED_EVENT: &str = "tidied";
+pub const LOOP_STOPPED_EVENT: &str = "loopStopped";
 
 pub struct WatchSession {
     requested: PathBuf,
@@ -108,20 +109,24 @@ fn tidy_one(
     if enabled.is_empty() {
         return;
     }
-    let Ok(tidyfile) = service.lock() else {
-        return;
-    };
     let collision = current_collision(settings_file);
-    if let Ok(report) = tidyfile.organize_file(&enabled, root, file, collision) {
-        announce(app, report);
+    let watched = {
+        let Ok(mut tidyfile) = service.lock() else {
+            return;
+        };
+        tidyfile.organize_file(&enabled, Arrival { root, file }, collision)
+    };
+    if let Ok(watched) = watched {
+        announce(app, watched);
     }
 }
 
-fn announce(app: &AppHandle, report: BatchReport) {
-    if !worth_announcing(&report) {
-        return;
-    }
-    let _ = app.emit(TIDIED_EVENT, report);
+fn announce(app: &AppHandle, watched: Watched) {
+    let _ = match watched {
+        Watched::Tidied(report) if worth_announcing(&report) => app.emit(TIDIED_EVENT, report),
+        Watched::LoopStopped(stopped) => app.emit(LOOP_STOPPED_EVENT, stopped),
+        Watched::Tidied(_) | Watched::Held => Ok(()),
+    };
 }
 
 fn worth_announcing(report: &BatchReport) -> bool {
@@ -154,6 +159,7 @@ mod tests {
             needs_manual_restore: 0,
             not_in_trash: 0,
             already_gone: 0,
+            not_recycled: 0,
         }
     }
 
